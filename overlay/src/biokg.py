@@ -1597,7 +1597,8 @@ class MorkBackend:
             " ".join(wrapped_patterns), template
         )
 
-        # 1. POST the transform — kicks off the rewrite asynchronously.
+        # 1. POST the transform. MORK returns the error inline in the body
+        # if it can't acquire the path (e.g. read-zipper holds the root).
         post = urllib.request.Request(
             f"{self._uri}/transform/",
             data=payload.encode(),
@@ -1605,16 +1606,25 @@ class MorkBackend:
             method="POST",
         )
         try:
-            urllib.request.urlopen(post, timeout=self._timeout).read()
+            resp_body = urllib.request.urlopen(
+                post, timeout=self._timeout
+            ).read().decode()
         except Exception:
             return []
+        # Permission errors come back as a plain-text 200 with an error message.
+        # Don't sit on the status poll for 30s when we already know it failed.
+        if "Permission error" in resp_body or "ServerPermissionErr" in resp_body:
+            return []
 
-        # 2. Poll /status/<template> until pathClear (transform done).
+        # 2. Poll /status/<template> until pathClear. Treat
+        # pathReadOnlyTemporary / pathForbiddenTemporary as transient (keep
+        # polling); any other non-pathClear status is a failure (bail).
         status_url = (
             f"{self._uri}/status/{urllib.parse.quote(template)}/"
         )
         deadline = time.time() + self._timeout
         delay = 0.005
+        transient = {"pathReadOnlyTemporary", "pathForbiddenTemporary"}
         while time.time() < deadline:
             try:
                 with urllib.request.urlopen(status_url, timeout=5) as r:
@@ -1624,6 +1634,8 @@ class MorkBackend:
             st = info.get("status", "")
             if st == "pathClear":
                 break
+            if st not in transient:
+                return []
             time.sleep(delay)
             delay = min(delay * 2, 0.5)
         else:
