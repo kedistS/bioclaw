@@ -2129,8 +2129,112 @@ class MorkBackend:
                 f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}")
 
     def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
-        return ("biokg mork backend: PLN source aggregate not yet ported. "
-                "Stay on BIOKG_BACKEND=neo4j for cross-method queries.")
+        """Cross-source consensus for all EDGE_TYPE edges incident to TARGET.
+
+        For each direction (target as source-of-edge, target as target-of-edge):
+        run one /transform that JOINs the edge atom with its (source ...)
+        annotation. Group results by source token, compute per-source mean
+        confidence, then PLN-revise across the per-source means."""
+        import uuid
+
+        safe_edge_type = "".join(
+            c for c in str(edge_type).strip() if c.isalnum() or c == "_"
+        )
+        if not safe_edge_type:
+            return f"error: invalid edge_type {edge_type!r}"
+
+        tgt_entity = self._resolve_name(target_name)
+        if not tgt_entity:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        t_label, t_id = tgt_entity
+        t_display = (self._resolve_id_to_name(t_label, t_id) or target_name).replace("_", " ")
+
+        header = f"PLN source-aggregate | {t_label}:{t_display} via {safe_edge_type}"
+
+        # Two transforms: one for each direction the target node can occupy
+        # in the edge. Each joins the edge atom with its source annotation.
+        in_tag = f"__bioclaw_agg_in_{uuid.uuid4().hex[:12]}"
+        out_tag = f"__bioclaw_agg_out_{uuid.uuid4().hex[:12]}"
+
+        # Direction: target is the SECOND endpoint of the edge.
+        edge_in = f"({safe_edge_type} ($o_label $o_id) ({t_label} {t_id}))"
+        raw_in = self._transform(
+            patterns=[edge_in, f"(source {edge_in} $src)"],
+            template=f"({in_tag} $o_label $o_id $src)",
+        )
+        # Direction: target is the FIRST endpoint of the edge.
+        edge_out = f"({safe_edge_type} ({t_label} {t_id}) ($o_label $o_id))"
+        raw_out = self._transform(
+            patterns=[edge_out, f"(source {edge_out} $src)"],
+            template=f"({out_tag} $o_label $o_id $src)",
+        )
+
+        # Group per-edge confidences by source token. Dedupe on
+        # (o_label, o_id, src) so an edge counted in both directions isn't
+        # double-counted (most edges only appear in one direction anyway).
+        seen = set()
+        per_source: dict = {}
+        for tag, raw in [(in_tag, raw_in), (out_tag, raw_out)]:
+            for line in raw:
+                s = line.strip()
+                if not (s.startswith("(") and s.endswith(")")):
+                    continue
+                inner = s[1:-1].strip()
+                if not inner.startswith(tag):
+                    continue
+                rest = inner[len(tag):].strip()
+                parts = rest.split()
+                if len(parts) < 3:
+                    continue
+                o_label, o_id = parts[0], parts[1]
+                src = " ".join(parts[2:])
+                key = (o_label, o_id, src)
+                if key in seen:
+                    continue
+                seen.add(key)
+                _f, c = _evidence_stv(
+                    None, src, edge_confidence=None, edge_score=None,
+                )
+                per_source.setdefault(src, []).append(c)
+
+        if not per_source:
+            return (f"{header} | no '{safe_edge_type}' edges incident to "
+                    f"{target_name!r} in BioKG. Check the entity name and "
+                    f"edge type.")
+
+        # Per-source summary segments + stvs for the cross-source merge.
+        src_segs = []
+        stvs = []
+        for src in sorted(per_source.keys()):
+            confs = per_source[src]
+            if not confs:
+                continue
+            mean_c = sum(confs) / len(confs)
+            cmax = max(confs)
+            clean_src = _clean_label(src)
+            src_segs.append(
+                f"{clean_src} n={len(confs)} mean={mean_c:.3f} max={cmax:.3f}"
+            )
+            stvs.append((1.0, mean_c))
+
+        sources_str = " + ".join(src_segs)
+
+        if len(stvs) == 1:
+            return f"{header} | {sources_str} | single source — no cross-source merge"
+
+        merged = _run_pln_merge(stvs)
+        if merged is None:
+            return f"{header} | {sources_str} | CROSS-SOURCE MERGE FAILED"
+
+        f_m, c_m = merged
+        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
+        cmp_op = ">=" if c_m >= 0.5 else "<"
+        return (
+            f"{header} | {sources_str} "
+            f"| CROSS-SOURCE MERGED {_fmt_stv(merged)} "
+            f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}"
+        )
 
 
 # ─── tiny helpers ───────────────────────────────────────────────────────────
