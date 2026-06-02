@@ -1623,7 +1623,10 @@ class MorkBackend:
             f"{self._uri}/status/{urllib.parse.quote(template)}/"
         )
         deadline = time.time() + self._timeout
-        delay = 0.005
+        # Tight polling: MORK transforms complete in <1s for our patterns;
+        # cap the per-poll delay so we don't overshoot. Starts at 10ms,
+        # doubles to 100ms.
+        delay = 0.01
         transient = {"pathReadOnlyTemporary", "pathForbiddenTemporary"}
         while time.time() < deadline:
             try:
@@ -1637,7 +1640,7 @@ class MorkBackend:
             if st not in transient:
                 return []
             time.sleep(delay)
-            delay = min(delay * 2, 0.5)
+            delay = min(delay * 2, 0.1)
         else:
             return []
 
