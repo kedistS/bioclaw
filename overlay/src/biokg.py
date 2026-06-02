@@ -1642,10 +1642,14 @@ class MorkBackend:
             return []
 
         # 3. /export the result atoms from the template location.
+        # The export PROJECTION must reference the same variables the scratch
+        # template wrote — otherwise MORK silently drops variables that don't
+        # appear in the projection. Using the same shape as the scratch
+        # template returns each matched atom in full.
         export_url = (
             f"{self._uri}/export/"
             f"{urllib.parse.quote(template)}/"
-            f"{urllib.parse.quote('$x')}/"
+            f"{urllib.parse.quote(template)}/"
         )
         try:
             with urllib.request.urlopen(export_url, timeout=self._timeout) as r:
