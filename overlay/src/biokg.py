@@ -1873,8 +1873,14 @@ class MorkBackend:
         # operation. We include `$name_prop` in the scratch so we can filter
         # out matches against non-name annotations (source, source_url, id,
         # db_reference, etc.) in Python below.
-        scratch_out = "(__bioclaw_lookup_out $edge $m_label $m_id $name_prop $m_name)"
-        scratch_in  = "(__bioclaw_lookup_in  $edge $m_label $m_id $name_prop $m_name)"
+        # Each call uses a unique scratch tag so back-to-back lookups don't
+        # collide on a persistent read-zipper at the same location.
+        import uuid
+        tag_suffix = uuid.uuid4().hex[:12]
+        out_tag = f"__bioclaw_lookup_out_{tag_suffix}"
+        in_tag  = f"__bioclaw_lookup_in_{tag_suffix}"
+        scratch_out = f"({out_tag} $edge $m_label $m_id $name_prop $m_name)"
+        scratch_in  = f"({in_tag} $edge $m_label $m_id $name_prop $m_name)"
 
         outgoing_raw = self._transform(
             patterns=[
@@ -1900,11 +1906,11 @@ class MorkBackend:
 
         raw_edges = []
         for line in outgoing_raw:
-            parsed = self._parse_lookup_row_v2(line, "__bioclaw_lookup_out", name_props)
+            parsed = self._parse_lookup_row_v2(line, out_tag, name_props)
             if parsed:
                 raw_edges.append(parsed + (True,))
         for line in incoming_raw:
-            parsed = self._parse_lookup_row_v2(line, "__bioclaw_lookup_in", name_props)
+            parsed = self._parse_lookup_row_v2(line, in_tag, name_props)
             if parsed:
                 raw_edges.append(parsed + (False,))
 
