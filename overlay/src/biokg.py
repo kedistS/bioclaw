@@ -1597,12 +1597,16 @@ class MorkBackend:
             " ".join(wrapped_patterns), template
         )
 
-        # 1. POST the transform. MORK returns the error inline in the body
-        # if it can't acquire the path (e.g. read-zipper holds the root).
+        # 1. POST the transform. MORK rejects Python's default User-Agent
+        # with 401 Unauthorized; curl works fine. Spoof curl explicitly.
         post = urllib.request.Request(
             f"{self._uri}/transform/",
             data=payload.encode(),
-            headers={"Content-Type": "text/plain"},
+            headers={
+                "Content-Type": "text/plain",
+                "User-Agent": "curl/7.81.0",
+                "Accept": "*/*",
+            },
             method="POST",
         )
         try:
