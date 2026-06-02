@@ -1775,21 +1775,28 @@ class MorkBackend:
         """Find the entity atom for a given name. Returns (label, id) or None.
 
         Tries each name property in turn (e.g. `(gene_name (gene $eid) NAME)`).
+        The metta_writer normalizes spaces → underscores in name values, so we
+        try the input as-is AND with that normalization applied.
         Falls back to treating the input as a raw ID if no name match works."""
-        for prop in self._name_props:
-            if prop == "id":
-                continue
-            results = self._query(
-                f"({prop} ($label $eid) {name})",
-                "($label $eid)",
-            )
-            for r in results:
-                parsed = self._parse_node(r)
-                if parsed:
-                    return parsed
+        candidates = [name]
+        normalized = name.replace(" ", "_")
+        if normalized != name:
+            candidates.append(normalized)
+
+        for cand in candidates:
+            for prop in self._name_props:
+                if prop == "id":
+                    continue
+                results = self._query(
+                    f"({prop} ($label $eid) {cand})",
+                    "($label $eid)",
+                )
+                for r in results:
+                    parsed = self._parse_node(r)
+                    if parsed:
+                        return parsed
 
         # Fallback: maybe the user passed a raw ID like 'ENSG00000141510'.
-        # Try matching it as the identifier of any known label.
         labels = self._candidate_labels()
         for label in labels:
             hits = self._query(f"({label} {name})", "matched")
@@ -2002,8 +2009,120 @@ class MorkBackend:
         return "biokg mork backend: autonomous-proposal tracking not yet ported"
 
     def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
-        return ("biokg mork backend: PLN evidence merge not yet ported. "
-                "Stay on BIOKG_BACKEND=neo4j for reconcile queries.")
+        """Merge evidence across all (source, evidence_code) pairs attached to
+        the specific edge (source_name)-[edge_type]->(target_name).
+
+        Strategy: one /transform that joins the edge atom with its (source ...)
+        and (evidence ...) annotation atoms. Each unique (src, ev) pair maps
+        to a stv via the same evidence ladder used by the Neo4j backend, then
+        PLN's Truth_Revision combines them."""
+        import uuid
+
+        safe_edge_type = "".join(
+            c for c in str(edge_type).strip() if c.isalnum() or c == "_"
+        )
+        if not safe_edge_type:
+            return f"error: invalid edge_type {edge_type!r}"
+
+        # Schema validation if a schema is loaded.
+        if self._schema is not None and safe_edge_type not in self._schema.edges:
+            known = ", ".join(sorted(self._schema.edges)) or "(none)"
+            return (f"error: edge type {safe_edge_type!r} is not in the loaded BioCypher "
+                    f"schema. Known edge types: {known}")
+
+        # Resolve endpoints by name.
+        src_entity = self._resolve_name(source_name)
+        if not src_entity:
+            return (f"error: source entity {source_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        s_label, s_id = src_entity
+
+        tgt_entity = self._resolve_name(target_name)
+        if not tgt_entity:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        t_label, t_id = tgt_entity
+
+        s_display = (self._resolve_id_to_name(s_label, s_id) or source_name).replace("_", " ")
+        t_display = (self._resolve_id_to_name(t_label, t_id) or target_name).replace("_", " ")
+
+        head = (f"PLN merge | {s_label}:{s_display} -{safe_edge_type}-> "
+                f"{t_label}:{t_display}")
+
+        # The edge atom as a literal pattern. Joined with all source +
+        # evidence annotations in a single transform.
+        edge_atom = f"({safe_edge_type} ({s_label} {s_id}) ({t_label} {t_id}))"
+        tag = f"__bioclaw_merge_{uuid.uuid4().hex[:12]}"
+        scratch = f"({tag} $src $ev)"
+
+        raw = self._transform(
+            patterns=[
+                edge_atom,
+                f"(source {edge_atom} $src)",
+                f"(evidence {edge_atom} $ev)",
+            ],
+            template=scratch,
+        )
+
+        # Parse out (src, ev) pairs. Dedupe — MORK's natural deduplication
+        # already collapses identical annotations, but if a transform happens
+        # to return duplicates, only keep distinct (src, ev) tuples.
+        seen_pairs = set()
+        sources_info = []
+        for line in raw:
+            s = line.strip()
+            if not (s.startswith("(") and s.endswith(")")):
+                continue
+            inner = s[1:-1].strip()
+            if not inner.startswith(tag):
+                continue
+            rest = inner[len(tag):].strip()
+            parts = rest.split()
+            if len(parts) < 2:
+                continue
+            src, ev = parts[0], " ".join(parts[1:])
+            if (src, ev) in seen_pairs:
+                continue
+            seen_pairs.add((src, ev))
+            f, c = _evidence_stv(ev, src, edge_confidence=None, edge_score=None)
+            if src and ev:
+                label = f"{src}/{ev}"
+            elif src:
+                label = src
+            elif ev:
+                label = ev
+            else:
+                label = "no-source"
+            sources_info.append((_clean_label(label), ev, (f, c)))
+
+        if not sources_info:
+            # Check whether the edge itself exists, to give a clearer error.
+            edge_probe = self._query(edge_atom, "matched")
+            if not any(h == "matched" for h in edge_probe):
+                return (f"{head} | no such edge in BioKG — "
+                        f"verify entity names and edge type.")
+            return (f"{head} | edge exists but carries no (source ...) or "
+                    f"(evidence ...) annotation atoms in MORK.")
+
+        if len(sources_info) == 1:
+            label, code, fc = sources_info[0]
+            return (f"{head} | single source: {label} {_fmt_stv(fc)} "
+                    f"| no merging — one source only")
+
+        source_segs = [f"{lbl} {_fmt_stv(fc)}" for lbl, _, fc in sources_info]
+        sources_str = " + ".join(source_segs)
+
+        merged = _run_pln_merge([s[2] for s in sources_info])
+        if merged is None:
+            return (f"{head} | sources: {sources_str} "
+                    f"| MERGE FAILED — PLN invocation error")
+
+        f_m, c_m = merged
+        act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
+        cmp_op = ">=" if c_m >= 0.5 else "<"
+        return (f"{head} | sources: {sources_str} "
+                f"| MERGED {_fmt_stv(merged)} via PLN revision "
+                f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}")
 
     def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
         return ("biokg mork backend: PLN source aggregate not yet ported. "
