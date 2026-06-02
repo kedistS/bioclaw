@@ -1502,67 +1502,46 @@ class Neo4jBackend:
         )
 
     def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
-        # Display names come from server-side coalesce; we just format here.
-        first = rows[0]
-        n_labels = first["n_labels"] or []
-        primary = _short(first.get("n_name") or name)
-        kind = ",".join(n_labels) if n_labels else "?"
-
-        connections = []
-        for r in rows:
-            rel = r.get("rel")
-            if not rel:
-                continue
-            m_labels = r.get("m_labels") or []
-            m_name = _short(r.get("m_name") or "?")
-            m_kind = ",".join(m_labels) if m_labels else "?"
-            arrow = "->" if r.get("outgoing") else "<-"
-            connections.append(f"  {arrow}[{rel}]{arrow[-1]} {m_name} ({m_kind})")
-
-        # Render multi-hop rows as their own block. Format: "[e1 → e2 ...]→ target (label, via X:y)".
-        indirect_lines = []
-        for r in (multihop_rows or []):
-            edges = r.get("edge_types") or []
-            via_labels = r.get("via_labels") or []
-            via_names = r.get("via_names") or []
-            via_pairs = ", ".join(f"{l}:{_short(n or '?')}" for l, n in zip(via_labels, via_names) if l)
-            path = " → ".join(edges) if edges else "?"
-            tgt_name = _short(r.get("m_name") or "?")
-            tgt_label = r.get("m_label") or "?"
-            via_part = f", via {via_pairs}" if via_pairs else ""
-            indirect_lines.append(f"  [{path}]→ {tgt_name} ({tgt_label}{via_part})")
-
-        if not connections and not indirect_lines:
-            return f"Entity: {primary} ({kind}) — no connections in BioKG."
-
-        # Dedupe identical direct connections, cap at 60 lines
-        seen = set()
-        deduped = []
-        for c in connections:
-            if c not in seen:
-                seen.add(c)
-                deduped.append(c)
-        truncated = ""
-        if len(deduped) > 60:
-            truncated = f"\n  ... +{len(deduped)-60} more direct connections"
-            deduped = deduped[:60]
-
-        out = (f"Entity: {primary} ({kind})\n"
-               f"Direct connections ({len(deduped)} shown):\n"
-               + "\n".join(deduped) + truncated)
-
-        if indirect_lines:
-            out += (f"\nIndirect connections via multi-hop schema paths ({len(indirect_lines)} shown):\n"
-                    + "\n".join(indirect_lines))
-        return out
+        return _format_lookup_result(name, rows, multihop_rows)
 
 
 class MorkBackend:
-    """MORK / AtomSpace-backed KG. Stub for Phase 3+ — to be implemented when
-    we have a running MORK instance."""
+    """MORK / AtomSpace-backed KG. Speaks MeTTa pattern queries via MORK's HTTP API.
+
+    Phase-1 implementation: lookup only. The remaining skills are stubs and
+    fall back to a friendly error until they're ported (task #85)."""
 
     def __init__(self, uri: str):
-        self._uri = uri
+        self._uri = uri.rstrip("/")
+
+        # Schema + datasources mirror the Neo4j backend so prompts and
+        # downstream helpers see the same surface.
+        self._schema = _load_schema()
+        self._datasources = _load_datasources()
+
+        env_props = os.environ.get(
+            "BIOCLAW_NAME_PROPERTIES",
+            os.environ.get("BIOKG_NAME_PROPERTIES", ""),
+        ).strip()
+        if env_props:
+            self._name_props = [p.strip() for p in env_props.split(",") if p.strip()]
+        elif self._schema is not None:
+            self._name_props = self._schema.name_properties()
+        else:
+            self._name_props = [
+                "gene_name", "protein_name", "transcript_name",
+                "pathway_name", "term_name", "id",
+            ]
+
+        # Namespace wrap — `biocypher-mork`'s load_metta_data.py imports atoms
+        # via template `(default $x)`, so by default queries must be wrapped
+        # in `(default ...)`. Override with MORK_NAMESPACE='' (empty) for raw
+        # atoms, or any other label if you loaded into a different space.
+        self._namespace = os.environ.get("MORK_NAMESPACE", "default").strip()
+
+        # HTTP timeout (seconds) for /export. MORK is fast but a malformed
+        # pattern can hang the connection — keep this short.
+        self._timeout = float(os.environ.get("MORK_TIMEOUT", "30"))
 
     @classmethod
     def from_env(cls):
@@ -1571,42 +1550,288 @@ class MorkBackend:
             raise RuntimeError("MORK_URI must be set when BIOKG_BACKEND=mork")
         return cls(uri)
 
-    def lookup(self, name: str) -> str:
-        return ("biokg mork backend is not yet implemented. "
-                "Stay on BIOKG_BACKEND=neo4j until the MORK driver lands.")
+    # ─── MORK plumbing ─────────────────────────────────────────────────────
+    def _wrap(self, expr: str) -> str:
+        if self._namespace:
+            return f"({self._namespace} {expr})"
+        return expr
 
+    def _query(self, pattern: str, template: str = "$x") -> list:
+        """Run a MORK /export and return matched-template strings, one per line.
+
+        MORK echoes the template literally when no atoms match, so we drop
+        lines that look like bare variable echoes (e.g. '$x', '$g')."""
+        import urllib.parse
+        import urllib.request
+        url = (
+            f"{self._uri}/export/"
+            f"{urllib.parse.quote(self._wrap(pattern))}/"
+            f"{urllib.parse.quote(template)}/"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=self._timeout) as r:
+                body = r.read().decode()
+        except Exception:
+            return []
+        out = []
+        for line in body.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            # Pure variable echo (no match) → skip.
+            if s.startswith("$") and " " not in s and "(" not in s:
+                continue
+            out.append(s)
+        return out
+
+    # ─── parsing helpers for MeTTa atoms returned in templates ─────────────
+    @staticmethod
+    def _parse_node(s: str):
+        """Parse '(<label> <id>)' → (label, id) or None."""
+        s = s.strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return None
+        parts = s[1:-1].strip().split(maxsplit=1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None
+
+    def _parse_edge_projection(self, s: str):
+        """Parse '(<edge> (<label> <id>))' → (edge, label, id) or None.
+
+        Handles the projection template '($edge $node)' returned by direct-edge
+        queries, where $node itself is a parenthesised atom."""
+        s = s.strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return None
+        inner = s[1:-1].strip()
+        # First token is the edge name, terminated by whitespace or '('.
+        i = 0
+        while i < len(inner) and inner[i] not in " (":
+            i += 1
+        edge = inner[:i].strip()
+        rest = inner[i:].strip()
+        if not edge or not rest.startswith("("):
+            return None
+        node = self._parse_node(rest)
+        if not node:
+            return None
+        return edge, node[0], node[1]
+
+    # ─── name <-> id ───────────────────────────────────────────────────────
+    def _resolve_name(self, name: str):
+        """Find the entity atom for a given name. Returns (label, id) or None.
+
+        Tries each name property in turn (e.g. `(gene_name (gene $eid) NAME)`).
+        Falls back to treating the input as a raw ID if no name match works."""
+        for prop in self._name_props:
+            if prop == "id":
+                continue
+            results = self._query(
+                f"({prop} ($label $eid) {name})",
+                "($label $eid)",
+            )
+            for r in results:
+                parsed = self._parse_node(r)
+                if parsed:
+                    return parsed
+
+        # Fallback: maybe the user passed a raw ID like 'ENSG00000141510'.
+        # Try matching it as the identifier of any known label.
+        labels = self._candidate_labels()
+        for label in labels:
+            hits = self._query(f"({label} {name})", "matched")
+            if any(h == "matched" for h in hits):
+                return label, name
+
+        return None
+
+    # Per-label name property — avoids 5 round-trips per neighbor.
+    _LABEL_NAME_PROP = {
+        "gene":                "gene_name",
+        "protein":             "protein_name",
+        "transcript":          "transcript_name",
+        "pathway":             "pathway_name",
+        "molecular_function":  "term_name",
+        "biological_process":  "term_name",
+        "cellular_component":  "term_name",
+        "disease":             "term_name",
+        "ontology_term":       "term_name",
+    }
+
+    def _resolve_id_to_name(self, label: str, eid: str):
+        """Reverse: (label, id) → display name, or None if no name atom exists.
+        Dispatches on label to query a single property, not the full list."""
+        prop = self._LABEL_NAME_PROP.get(label)
+        if prop:
+            results = self._query(
+                f"({prop} ({label} {eid}) $name)",
+                "$name",
+            )
+            for r in results:
+                if r and not r.startswith("$"):
+                    return r
+            return None
+        # Unknown label — fall back to trying all properties.
+        for prop in self._name_props:
+            if prop == "id":
+                continue
+            results = self._query(
+                f"({prop} ({label} {eid}) $name)",
+                "$name",
+            )
+            for r in results:
+                if r and not r.startswith("$"):
+                    return r
+        return None
+
+    def _candidate_labels(self):
+        """Best-effort list of node labels for fallback ID matching."""
+        if self._schema is not None and getattr(self._schema, "nodes", None):
+            labs = set()
+            for cfg in self._schema.nodes.values():
+                lbl = cfg.get("input_label") if isinstance(cfg, dict) else None
+                if isinstance(lbl, list):
+                    for l in lbl:
+                        if l:
+                            labs.add(str(l).replace(" ", "_").lower())
+                elif lbl:
+                    labs.add(str(lbl).replace(" ", "_").lower())
+            if labs:
+                return sorted(labs)
+        return [
+            "gene", "protein", "transcript", "pathway",
+            "molecular_function", "biological_process",
+            "cellular_component", "disease", "enhancer",
+        ]
+
+    # ─── lookup ────────────────────────────────────────────────────────────
+    def lookup(self, name: str) -> str:
+        max_conn = int(os.environ.get("BIOKG_MAX_CONNECTIONS", "20"))
+
+        entity = self._resolve_name(name)
+        if not entity:
+            return (
+                f"No entity matching {name!r} found in BioKG "
+                f"(tried properties: {', '.join(self._name_props)})."
+            )
+
+        label, eid = entity
+        display_name = self._resolve_id_to_name(label, eid) or name
+
+        # Collect raw edge tuples first (no name resolution yet), so we can
+        # cap the pool BEFORE doing per-neighbor lookups.
+        raw_edges = []  # list of (edge, m_label, m_id, outgoing)
+
+        for r in self._query(
+            f"($edge ({label} {eid}) $tgt)",
+            "($edge $tgt)",
+        ):
+            parsed = self._parse_edge_projection(r)
+            if parsed:
+                edge, m_label, m_id = parsed
+                raw_edges.append((edge, m_label, m_id, True))
+
+        for r in self._query(
+            f"($edge $src ({label} {eid}))",
+            "($edge $src)",
+        ):
+            parsed = self._parse_edge_projection(r)
+            if parsed:
+                edge, m_label, m_id = parsed
+                raw_edges.append((edge, m_label, m_id, False))
+
+        # Dedupe identical tuples (MORK can emit the same projection more
+        # than once when annotation atoms also match the variable shape).
+        seen = set()
+        deduped = []
+        for tup in raw_edges:
+            if tup not in seen:
+                seen.add(tup)
+                deduped.append(tup)
+        raw_edges = deduped
+
+        # Cap BEFORE resolving names — each name lookup is one HTTP round-trip.
+        if len(raw_edges) > max_conn:
+            raw_edges = raw_edges[:max_conn]
+
+        # Now resolve names for the shortlist.
+        rows = []
+        for edge, m_label, m_id, outgoing in raw_edges:
+            m_name = self._resolve_id_to_name(m_label, m_id) or m_id
+            rows.append({
+                "n_labels": [label],
+                "n_name": display_name,
+                "rel": edge,
+                "outgoing": outgoing,
+                "m_labels": [m_label],
+                "m_name": m_name,
+            })
+
+        if not rows:
+            rows = [{
+                "n_labels": [label],
+                "n_name": display_name,
+                "rel": None,
+                "m_labels": [],
+                "m_name": None,
+            }]
+
+        # NB: multi-hop traversal is not yet ported. The Neo4j path uses
+        # Cypher's variable-length pattern matching which has no direct MORK
+        # analogue; a per-edge-type probing strategy is the planned port.
+        return _format_lookup_result(name, rows, multihop_rows=None)
+
+    # ─── stubs for the rest of the skills (port in follow-up) ──────────────
     def query(self, qs: str) -> str:
-        return self.lookup("")
+        return ("biokg-query against MORK is not yet ported. "
+                "Use biokg-lookup for direct entity exploration.")
 
     def stage_edge(self, *args, **kwargs) -> str:
-        return "biokg mork backend is not yet implemented; cannot stage proposals"
+        return ("biokg mork backend: staging not yet ported. "
+                "Stay on BIOKG_BACKEND=neo4j to propose new edges.")
 
-    def list_staging(self) -> str:
-        return "biokg mork backend is not yet implemented; no staging area"
+    def list_staging(self, limit: int = 50) -> str:
+        return "biokg mork backend: staging area not yet ported"
 
     def promote(self, sid: str) -> str:
-        return "biokg mork backend is not yet implemented; cannot promote"
+        return "biokg mork backend: promote not yet ported"
 
     def reject(self, sid: str) -> str:
-        return "biokg mork backend is not yet implemented; cannot reject"
+        return "biokg mork backend: reject not yet ported"
 
     def describe_schema(self) -> str:
-        return "biokg mork backend is not yet implemented; no schema available"
+        if self._schema is None:
+            return ("No schema loaded. Set BIOCLAW_SCHEMA_FILE or install PyYAML "
+                    "+ ensure /opt/bioclaw/config/schema.yaml exists.")
+        return self._schema.summary()
 
     def provenance(self, name: str, limit: int = 8) -> str:
-        return "biokg mork backend is not yet implemented; no provenance"
+        return "biokg mork backend: provenance not yet ported"
 
     def describe_source(self, key: str) -> str:
-        return "biokg mork backend is not yet implemented; no data-source registry"
+        if not self._datasources:
+            return f"no data-source registry loaded; cannot resolve {key!r}"
+        info = (self._datasources.get(key)
+                or self._datasources.get(str(key).strip().lower()))
+        if not info:
+            return f"no entry for source {key!r} in the data-source registry"
+        name = info.get("name") or key
+        url = info.get("url") or ""
+        if isinstance(url, list):
+            url = "; ".join(url)
+        return f"{name}{' <' + url + '>' if url else ''}"
 
     def recent_autonomous(self, agent: str, window: int) -> str:
-        return "biokg mork backend is not yet implemented; no autonomous-proposal tracking"
+        return "biokg mork backend: autonomous-proposal tracking not yet ported"
 
     def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
-        return "biokg mork backend is not yet implemented; PLN merge unavailable"
+        return ("biokg mork backend: PLN evidence merge not yet ported. "
+                "Stay on BIOKG_BACKEND=neo4j for reconcile queries.")
 
     def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
-        return "biokg mork backend is not yet implemented; PLN source aggregate unavailable"
+        return ("biokg mork backend: PLN source aggregate not yet ported. "
+                "Stay on BIOKG_BACKEND=neo4j for cross-method queries.")
 
 
 # ─── tiny helpers ───────────────────────────────────────────────────────────
@@ -1623,6 +1848,68 @@ def _short(value: Any, limit: int = 80) -> str:
     if len(s) <= limit:
         return s
     return s[: limit - 3] + "..."
+
+
+def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
+    """Render a lookup result. Shared between Neo4jBackend and MorkBackend so
+    both backends produce byte-identical output for the same logical data."""
+    first = rows[0]
+    n_labels = first.get("n_labels") or []
+    primary = _short(first.get("n_name") or name)
+    kind = ",".join(n_labels) if n_labels else "?"
+
+    connections = []
+    for r in rows:
+        rel = r.get("rel")
+        if not rel:
+            continue
+        m_labels = r.get("m_labels") or []
+        m_name = _short(r.get("m_name") or "?")
+        m_kind = ",".join(m_labels) if m_labels else "?"
+        arrow = "->" if r.get("outgoing") else "<-"
+        connections.append(f"  {arrow}[{rel}]{arrow[-1]} {m_name} ({m_kind})")
+
+    indirect_lines = []
+    for r in (multihop_rows or []):
+        edges = r.get("edge_types") or []
+        via_labels = r.get("via_labels") or []
+        via_names = r.get("via_names") or []
+        via_pairs = ", ".join(
+            f"{l}:{_short(n or '?')}" for l, n in zip(via_labels, via_names) if l
+        )
+        path = " → ".join(edges) if edges else "?"
+        tgt_name = _short(r.get("m_name") or "?")
+        tgt_label = r.get("m_label") or "?"
+        via_part = f", via {via_pairs}" if via_pairs else ""
+        indirect_lines.append(f"  [{path}]→ {tgt_name} ({tgt_label}{via_part})")
+
+    if not connections and not indirect_lines:
+        return f"Entity: {primary} ({kind}) — no connections in BioKG."
+
+    seen = set()
+    deduped = []
+    for c in connections:
+        if c not in seen:
+            seen.add(c)
+            deduped.append(c)
+    truncated = ""
+    if len(deduped) > 60:
+        truncated = f"\n  ... +{len(deduped)-60} more direct connections"
+        deduped = deduped[:60]
+
+    out = (
+        f"Entity: {primary} ({kind})\n"
+        f"Direct connections ({len(deduped)} shown):\n"
+        + "\n".join(deduped)
+        + truncated
+    )
+    if indirect_lines:
+        out += (
+            f"\nIndirect connections via multi-hop schema paths "
+            f"({len(indirect_lines)} shown):\n"
+            + "\n".join(indirect_lines)
+        )
+    return out
 
 
 def _format_refs(value: Any) -> str:
