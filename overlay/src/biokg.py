@@ -1690,6 +1690,29 @@ class MorkBackend:
             return parts[0], parts[1]
         return None
 
+    def _parse_lookup_row_v2(self, s: str, tag: str, name_props: set):
+        """Parse '(<tag> <edge> <m_label> <m_id> <name_prop> <m_name>)' and
+        only return the tuple if <name_prop> is in the whitelist of known
+        name properties. Filters out matches against annotation atoms like
+        (source ...), (source_url ...), (id ...), (db_reference ...)."""
+        s = s.strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return None
+        inner = s[1:-1].strip()
+        if not inner.startswith(tag):
+            return None
+        rest = inner[len(tag):].strip()
+        parts = rest.split()
+        if len(parts) < 5:
+            return None
+        edge, m_label, m_id, name_prop = parts[0], parts[1], parts[2], parts[3]
+        m_name = " ".join(parts[4:])
+        if name_prop not in name_props:
+            return None
+        if m_label not in self._known_node_labels():
+            return None
+        return edge, m_label, m_id, m_name
+
     def _parse_lookup_row(self, s: str, tag: str):
         """Parse '(<tag> <edge> <m_label> <m_id> <m_name>)' → (edge, m_label, m_id, m_name).
 
@@ -1846,15 +1869,12 @@ class MorkBackend:
         display_name = self._resolve_id_to_name(label, eid) or name
 
         # ── MeTTa-native fetch: one /transform per direction that JOINS the
-        # edge atoms with the neighbor's name-property atom in a single MORK
-        # operation. No Python loop over neighbors — names come back already
-        # resolved.
-        # The join works against any of the configured name properties, so
-        # genes, GO terms, pathways, etc. all return their human names.
-        # `$name_prop` is left unconstrained; we filter out non-name matches
-        # in `_parse_edge_with_name` below.
-        scratch_out = "(__bioclaw_lookup_out $edge $m_label $m_id $m_name)"
-        scratch_in  = "(__bioclaw_lookup_in  $edge $m_label $m_id $m_name)"
+        # edge atoms with neighbor annotation atoms in a single MORK
+        # operation. We include `$name_prop` in the scratch so we can filter
+        # out matches against non-name annotations (source, source_url, id,
+        # db_reference, etc.) in Python below.
+        scratch_out = "(__bioclaw_lookup_out $edge $m_label $m_id $name_prop $m_name)"
+        scratch_in  = "(__bioclaw_lookup_in  $edge $m_label $m_id $name_prop $m_name)"
 
         outgoing_raw = self._transform(
             patterns=[
@@ -1871,35 +1891,48 @@ class MorkBackend:
             template=scratch_in,
         )
 
+        # Known name-property whitelist. Only matches with one of these in
+        # the $name_prop slot are kept; everything else is annotation noise.
+        name_props = set(self._LABEL_NAME_PROP.values()) | {
+            "gene_name", "protein_name", "transcript_name",
+            "pathway_name", "term_name",
+        }
+
         raw_edges = []
         for line in outgoing_raw:
-            parsed = self._parse_lookup_row(line, "__bioclaw_lookup_out")
+            parsed = self._parse_lookup_row_v2(line, "__bioclaw_lookup_out", name_props)
             if parsed:
                 raw_edges.append(parsed + (True,))
         for line in incoming_raw:
-            parsed = self._parse_lookup_row(line, "__bioclaw_lookup_in")
+            parsed = self._parse_lookup_row_v2(line, "__bioclaw_lookup_in", name_props)
             if parsed:
                 raw_edges.append(parsed + (False,))
 
-        # Dedupe and cap.
-        seen = set()
-        deduped = []
+        # Same neighbor may still appear multiple times if its node has
+        # multiple legitimate name properties (e.g. a gene with both
+        # gene_name and a synonym). Collapse on (edge, m_label, m_id) and
+        # keep the first name we saw.
+        deduped_by_neighbor = {}
         for tup in raw_edges:
-            if tup not in seen:
-                seen.add(tup)
-                deduped.append(tup)
+            edge, m_label, m_id, m_name, outgoing = tup
+            key = (edge, m_label, m_id, outgoing)
+            if key not in deduped_by_neighbor:
+                deduped_by_neighbor[key] = tup
+
+        deduped = list(deduped_by_neighbor.values())
         if len(deduped) > max_conn:
             deduped = deduped[:max_conn]
 
         rows = []
         for edge, m_label, m_id, m_name, outgoing in deduped:
+            display_m = (m_name or m_id).replace("_", " ")
             rows.append({
                 "n_labels": [label],
                 "n_name": display_name,
                 "rel": edge,
                 "outgoing": outgoing,
                 "m_labels": [m_label],
-                "m_name": m_name or m_id,
+                "m_name": display_m,
             })
 
         if not rows:
