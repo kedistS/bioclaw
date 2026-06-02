@@ -1573,12 +1573,90 @@ class MorkBackend:
                 body = r.read().decode()
         except Exception:
             return []
+        return self._parse_body(body)
+
+    def _transform(self, patterns: list, template: str) -> list:
+        """Run a MORK /transform — a single pattern-match that joins multiple
+        patterns AND emits one row per unified variable binding through the
+        template. Use this instead of looping N /export calls in Python.
+
+        Submits POST /transform with payload `(transform (, p1 p2 ...) (, t))`.
+        MORK writes the result atoms into the template location, then we
+        /export them out. Polling uses /status/<template> for completion.
+
+        Each pattern is wrapped with the namespace (default by default), but
+        the template is left raw so callers can choose any scratch location.
+        """
+        import json
+        import time
+        import urllib.parse
+        import urllib.request
+
+        wrapped_patterns = [self._wrap(p) for p in patterns]
+        payload = "(transform (, {}) (, {}))".format(
+            " ".join(wrapped_patterns), template
+        )
+
+        # 1. POST the transform — kicks off the rewrite asynchronously.
+        post = urllib.request.Request(
+            f"{self._uri}/transform/",
+            data=payload.encode(),
+            headers={"Content-Type": "text/plain"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(post, timeout=self._timeout).read()
+        except Exception:
+            return []
+
+        # 2. Poll /status/<template> until pathClear (transform done).
+        status_url = (
+            f"{self._uri}/status/{urllib.parse.quote(template)}/"
+        )
+        deadline = time.time() + self._timeout
+        delay = 0.005
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(status_url, timeout=5) as r:
+                    info = json.loads(r.read().decode())
+            except Exception:
+                return []
+            st = info.get("status", "")
+            if st == "pathClear":
+                break
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+        else:
+            return []
+
+        # 3. /export the result atoms from the template location.
+        export_url = (
+            f"{self._uri}/export/"
+            f"{urllib.parse.quote(template)}/"
+            f"{urllib.parse.quote('$x')}/"
+        )
+        try:
+            with urllib.request.urlopen(export_url, timeout=self._timeout) as r:
+                body = r.read().decode()
+        except Exception:
+            return []
+
+        # 4. Clean up the scratch space so repeated calls don't accumulate.
+        clear_url = f"{self._uri}/clear/{urllib.parse.quote(template)}/"
+        try:
+            urllib.request.urlopen(clear_url, timeout=5).read()
+        except Exception:
+            pass
+
+        return self._parse_body(body)
+
+    @staticmethod
+    def _parse_body(body: str) -> list:
         out = []
         for line in body.splitlines():
             s = line.strip()
             if not s:
                 continue
-            # Pure variable echo (no match) → skip.
             if s.startswith("$") and " " not in s and "(" not in s:
                 continue
             out.append(s)
@@ -1595,6 +1673,38 @@ class MorkBackend:
         if len(parts) == 2:
             return parts[0], parts[1]
         return None
+
+    def _parse_lookup_row(self, s: str, tag: str):
+        """Parse '(<tag> <edge> <m_label> <m_id> <m_name>)' → (edge, m_label, m_id, m_name).
+
+        Returns None for non-matching shapes — including rows where MORK
+        joined an annotation atom that wasn't a real edge (e.g. evidence,
+        source, db_reference). Heuristic: $m_label and $m_id must come from
+        a typed node atom (label is a known node type)."""
+        s = s.strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return None
+        inner = s[1:-1].strip()
+        # Must start with our sentinel tag.
+        if not inner.startswith(tag):
+            return None
+        rest = inner[len(tag):].strip()
+        # rest = "<edge> <m_label> <m_id> <m_name>" — 4 whitespace-separated tokens.
+        # m_name can contain underscores/hyphens but no spaces (preprocess_id
+        # already stripped those).
+        parts = rest.split()
+        if len(parts) < 4:
+            return None
+        edge, m_label, m_id, m_name = parts[0], parts[1], parts[2], " ".join(parts[3:])
+        # Drop annotation-atom matches — only keep node-type m_labels.
+        if m_label not in self._known_node_labels():
+            return None
+        return edge, m_label, m_id, m_name
+
+    def _known_node_labels(self):
+        if not hasattr(self, "_known_labels_cache"):
+            self._known_labels_cache = set(self._candidate_labels())
+        return self._known_labels_cache
 
     def _parse_edge_projection(self, s: str):
         """Parse '(<edge> (<label> <id>))' → (edge, label, id) or None.
@@ -1719,53 +1829,61 @@ class MorkBackend:
         label, eid = entity
         display_name = self._resolve_id_to_name(label, eid) or name
 
-        # Collect raw edge tuples first (no name resolution yet), so we can
-        # cap the pool BEFORE doing per-neighbor lookups.
-        raw_edges = []  # list of (edge, m_label, m_id, outgoing)
+        # ── MeTTa-native fetch: one /transform per direction that JOINS the
+        # edge atoms with the neighbor's name-property atom in a single MORK
+        # operation. No Python loop over neighbors — names come back already
+        # resolved.
+        # The join works against any of the configured name properties, so
+        # genes, GO terms, pathways, etc. all return their human names.
+        # `$name_prop` is left unconstrained; we filter out non-name matches
+        # in `_parse_edge_with_name` below.
+        scratch_out = "(__bioclaw_lookup_out $edge $m_label $m_id $m_name)"
+        scratch_in  = "(__bioclaw_lookup_in  $edge $m_label $m_id $m_name)"
 
-        for r in self._query(
-            f"($edge ({label} {eid}) $tgt)",
-            "($edge $tgt)",
-        ):
-            parsed = self._parse_edge_projection(r)
+        outgoing_raw = self._transform(
+            patterns=[
+                f"($edge ({label} {eid}) ($m_label $m_id))",
+                f"($name_prop ($m_label $m_id) $m_name)",
+            ],
+            template=scratch_out,
+        )
+        incoming_raw = self._transform(
+            patterns=[
+                f"($edge ($m_label $m_id) ({label} {eid}))",
+                f"($name_prop ($m_label $m_id) $m_name)",
+            ],
+            template=scratch_in,
+        )
+
+        raw_edges = []
+        for line in outgoing_raw:
+            parsed = self._parse_lookup_row(line, "__bioclaw_lookup_out")
             if parsed:
-                edge, m_label, m_id = parsed
-                raw_edges.append((edge, m_label, m_id, True))
-
-        for r in self._query(
-            f"($edge $src ({label} {eid}))",
-            "($edge $src)",
-        ):
-            parsed = self._parse_edge_projection(r)
+                raw_edges.append(parsed + (True,))
+        for line in incoming_raw:
+            parsed = self._parse_lookup_row(line, "__bioclaw_lookup_in")
             if parsed:
-                edge, m_label, m_id = parsed
-                raw_edges.append((edge, m_label, m_id, False))
+                raw_edges.append(parsed + (False,))
 
-        # Dedupe identical tuples (MORK can emit the same projection more
-        # than once when annotation atoms also match the variable shape).
+        # Dedupe and cap.
         seen = set()
         deduped = []
         for tup in raw_edges:
             if tup not in seen:
                 seen.add(tup)
                 deduped.append(tup)
-        raw_edges = deduped
+        if len(deduped) > max_conn:
+            deduped = deduped[:max_conn]
 
-        # Cap BEFORE resolving names — each name lookup is one HTTP round-trip.
-        if len(raw_edges) > max_conn:
-            raw_edges = raw_edges[:max_conn]
-
-        # Now resolve names for the shortlist.
         rows = []
-        for edge, m_label, m_id, outgoing in raw_edges:
-            m_name = self._resolve_id_to_name(m_label, m_id) or m_id
+        for edge, m_label, m_id, m_name, outgoing in deduped:
             rows.append({
                 "n_labels": [label],
                 "n_name": display_name,
                 "rel": edge,
                 "outgoing": outgoing,
                 "m_labels": [m_label],
-                "m_name": m_name,
+                "m_name": m_name or m_id,
             })
 
         if not rows:
