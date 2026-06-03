@@ -36,6 +36,7 @@ x-common-env: &common-env
   BIOCLAW_IRC_AUTH_REQUIRED: ${BIOCLAW_IRC_AUTH_REQUIRED:-false}
   BIOCLAW_PEER_TIMEOUT: ${BIOCLAW_PEER_TIMEOUT:-300}
   MORK_URI: ${MORK_URI:-}
+  MORK_NAMESPACE: ${MORK_NAMESPACE:-default}
 
 services:
   conductor:
