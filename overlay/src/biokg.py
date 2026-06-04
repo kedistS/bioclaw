@@ -274,7 +274,18 @@ def lookup(name: str) -> str:
         if cached and (time.time() - cached[0]) < ttl:
             return cached[1] + "\n(cached)"
     result = _get_backend().lookup(name)
-    if ttl > 0 and not result.startswith(("error:", "biokg unavailable", "biokg neo4j error")):
+    # Only cache results that actually contain edge data. Empty / failure
+    # shapes ('no connections', 'not found', error strings) MUST NOT be
+    # cached — caching a transient empty during MORK warm-up would mean
+    # every subsequent lookup returns "no connections" for the full TTL.
+    cacheable = (
+        ttl > 0
+        and not result.startswith(("error:", "biokg unavailable", "biokg neo4j error"))
+        and "no connections in BioKG" not in result
+        and "No entity matching" not in result
+        and ("|" in result or "->" in result or "<-" in result)
+    )
+    if cacheable:
         with _cache_lock:
             _cache[key] = (time.time(), result)
     return result
