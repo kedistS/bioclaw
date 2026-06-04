@@ -1810,6 +1810,8 @@ class MorkBackend:
         return None
 
     # Per-label name property — avoids 5 round-trips per neighbor.
+    # Labels mapped to the empty string have NO name property; their ID IS the
+    # display name (e.g. enhancer regions encode chromosomal coordinates).
     _LABEL_NAME_PROP = {
         "gene":                "gene_name",
         "protein":             "protein_name",
@@ -1820,13 +1822,18 @@ class MorkBackend:
         "cellular_component":  "term_name",
         "disease":             "term_name",
         "ontology_term":       "term_name",
+        "enhancer":            "",
     }
 
     def _resolve_id_to_name(self, label: str, eid: str):
         """Reverse: (label, id) → display name, or None if no name atom exists.
-        Dispatches on label to query a single property, not the full list."""
-        prop = self._LABEL_NAME_PROP.get(label)
-        if prop:
+        Dispatches on label to query a single property, not the full list.
+        Empty mapping in _LABEL_NAME_PROP means "no name property exists for
+        this label" — skip the lookup entirely, the ID is the display name."""
+        if label in self._LABEL_NAME_PROP:
+            prop = self._LABEL_NAME_PROP[label]
+            if not prop:
+                return None  # ID is the display name (e.g. enhancer)
             results = self._query(
                 f"({prop} ({label} {eid}) $name)",
                 "$name",
@@ -2249,13 +2256,13 @@ class MorkBackend:
                     "+ ensure /opt/bioclaw/config/schema.yaml exists.")
         return self._schema.summary()
 
-    def provenance(self, name: str, limit: int = 8) -> str:
+    def provenance(self, name: str, limit: int = 5) -> str:
         """Return the per-edge provenance for an entity's connections. Covers
         both BioCypher annotations (source, evidence, db_reference) and BioClaw
-        agent annotations (staging_by, staging_status, staging_at) when present.
+        agent annotations (staging_by, staging_status) when present.
 
-        One transform per annotation type — joined with the edge in each, then
-        merged in Python."""
+        Total MORK roundtrips scale linearly with `limit` (one annotation-pull
+        per shown edge), so keep limit small for IRC reliability."""
         import uuid
 
         entity = self._resolve_name(name)
@@ -2265,9 +2272,11 @@ class MorkBackend:
         label, eid = entity
         display_name = (self._resolve_id_to_name(label, eid) or name).replace("_", " ")
 
-        # Step 1: get all edges incident to the entity (both directions),
-        # keyed by (edge_type, m_label, m_id, outgoing).
-        edges = {}  # key -> {"rel": str, "m_label": str, "m_id": str, "outgoing": bool, "bits": [], "agent": {}}
+        # Step 1: enumerate all incident edges (both directions). One transform
+        # per direction. We deliberately fetch ALL edges so we can prioritize
+        # staging-origin ones before capping, then pull annotations only for
+        # the survivors — bounded MORK work.
+        edges = {}
 
         tag_o = f"bioclaw_prov_out_{uuid.uuid4().hex[:12]}"
         tag_i = f"bioclaw_prov_in_{uuid.uuid4().hex[:12]}"
@@ -2275,89 +2284,85 @@ class MorkBackend:
             patterns=[f"($edge ({label} {eid}) ($m_label $m_id))"],
             template=f"({tag_o} $edge $m_label $m_id)",
         ):
-            s = line.strip()
-            if not (s.startswith("(") and s.endswith(")")):
-                continue
-            inner = s[1:-1].strip()
-            if not inner.startswith(tag_o):
-                continue
-            parts = inner[len(tag_o):].strip().split()
-            if len(parts) < 3:
-                continue
-            rel, m_label, m_id = parts[0], parts[1], parts[2]
-            if m_label not in self._known_node_labels():
-                continue
-            key = (rel, m_label, m_id, True)
-            edges.setdefault(key, {"rel": rel, "m_label": m_label, "m_id": m_id,
-                                   "outgoing": True, "bits": [], "agent": {}})
-
+            self._record_provenance_edge(line, tag_o, True, edges)
         for line in self._transform(
             patterns=[f"($edge ($m_label $m_id) ({label} {eid}))"],
             template=f"({tag_i} $edge $m_label $m_id)",
         ):
-            s = line.strip()
-            if not (s.startswith("(") and s.endswith(")")):
-                continue
-            inner = s[1:-1].strip()
-            if not inner.startswith(tag_i):
-                continue
-            parts = inner[len(tag_i):].strip().split()
-            if len(parts) < 3:
-                continue
-            rel, m_label, m_id = parts[0], parts[1], parts[2]
-            if m_label not in self._known_node_labels():
-                continue
-            key = (rel, m_label, m_id, False)
-            edges.setdefault(key, {"rel": rel, "m_label": m_label, "m_id": m_id,
-                                   "outgoing": False, "bits": [], "agent": {}})
+            self._record_provenance_edge(line, tag_i, False, edges)
 
         if not edges:
             return f"Provenance for {label}:{display_name}: no connected edges in BioKG."
 
-        # Step 2: for each annotation type, run one transform joining the
-        # edge with that annotation. Annotate rows in `edges`.
-        annotation_pairs = [
+        total_edges = len(edges)
+
+        # Step 2: pull staging_id annotations across ALL edges in one transform
+        # so we can identify staging-origin edges and surface them first.
+        staging_origin = set()
+        tag_sid = f"bioclaw_prov_sid_{uuid.uuid4().hex[:8]}"
+        for line in self._transform(
+            patterns=[
+                f"(staging_id ($et ({label} {eid}) ($m_label $m_id)) $sid)",
+            ],
+            template=f"({tag_sid} $et $m_label $m_id outgoing $sid)",
+        ):
+            self._mark_staging_origin(line, tag_sid, edges, staging_origin, True)
+        tag_sid_in = f"{tag_sid}_in"
+        for line in self._transform(
+            patterns=[
+                f"(staging_id ($et ($m_label $m_id) ({label} {eid})) $sid)",
+            ],
+            template=f"({tag_sid_in} $et $m_label $m_id incoming $sid)",
+        ):
+            self._mark_staging_origin(line, tag_sid_in, edges, staging_origin, False)
+
+        # Step 3: cap edges to limit — staging-origin first, then the rest.
+        ordered_keys = (
+            [k for k in edges if k in staging_origin]
+            + [k for k in edges if k not in staging_origin]
+        )
+        capped_keys = ordered_keys[:limit]
+
+        # Step 4: pull annotations only for the capped edges. ONE transform per
+        # annotation type, but the joins are narrow (one specific edge) so MORK
+        # serves them quickly.
+        annotations = [
             ("source", "edge source"),
             ("evidence", "evidence"),
             ("db_reference", "db_ref"),
             ("staging_by", "_agent_by"),
             ("staging_status", "_agent_status"),
-            ("staging_at", "_agent_at"),
             ("staging_evidence", "_agent_evidence"),
         ]
-        for annotation, display_key in annotation_pairs:
-            tag = f"bioclaw_prov_{annotation}_{uuid.uuid4().hex[:8]}"
-            # outgoing direction
-            for line in self._transform(
-                patterns=[
-                    f"({annotation} ($et ({label} {eid}) ($m_label $m_id)) $val)",
-                ],
-                template=f"({tag} $et $m_label $m_id $val)",
-            ):
-                self._merge_provenance_row(line, tag, True, edges, display_key)
-            # incoming direction
-            tag2 = f"{tag}_in"
-            for line in self._transform(
-                patterns=[
-                    f"({annotation} ($et ($m_label $m_id) ({label} {eid})) $val)",
-                ],
-                template=f"({tag2} $et $m_label $m_id $val)",
-            ):
-                self._merge_provenance_row(line, tag2, False, edges, display_key)
+        for key in capped_keys:
+            rel, m_label, m_id, outgoing = key
+            edge_atom = (
+                f"({rel} ({label} {eid}) ({m_label} {m_id}))"
+                if outgoing
+                else f"({rel} ({m_label} {m_id}) ({label} {eid}))"
+            )
+            for annotation, display_key in annotations:
+                tag = f"bioclaw_prov_{annotation}_{uuid.uuid4().hex[:8]}"
+                for line in self._transform(
+                    patterns=[f"({annotation} {edge_atom} $val)"],
+                    template=f"({tag} $val)",
+                ):
+                    s = line.strip()
+                    if not (s.startswith("(") and s.endswith(")")):
+                        continue
+                    inner = s[1:-1].strip()
+                    if not inner.startswith(tag):
+                        continue
+                    val = inner[len(tag):].strip()
+                    if val:
+                        edges[key][display_key] = val
+                        break  # one annotation value per type is enough
 
-        # Step 3: format. Sort so staging-origin edges (proposed via BioClaw)
-        # appear first — same fix shape as the lookup ORDER BY.
-        def _sort_key(item):
-            key, info = item
-            has_staging = 1 if (info.get("_agent_by") or info.get("_agent_status")) else 0
-            return (-has_staging, info.get("rel", ""), info.get("m_id", ""))
-        edge_items = sorted(edges.items(), key=_sort_key)
-
-        # Also resolve neighbor display names so the output reads as names,
-        # not raw IDs.
-        out = [f"Provenance for {label}:{display_name} ({len(edges)} edges):"]
+        # Step 5: format. Resolve neighbor display names for the capped set.
+        out = [f"Provenance for {label}:{display_name} ({total_edges} edges, {len(capped_keys)} shown):"]
         rendered = 0
-        for key, info in edge_items:
+        for key in capped_keys:
+            info = edges[key]
             if rendered >= limit:
                 break
             m_display = (
@@ -2402,8 +2407,30 @@ class MorkBackend:
         body = " | ".join(seg.strip() for seg in out[1:])
         return f"{head} | {body}"
 
-    def _merge_provenance_row(self, line: str, tag: str, outgoing: bool,
-                              edges: dict, display_key: str):
+    def _record_provenance_edge(self, line: str, tag: str, outgoing: bool,
+                                edges: dict):
+        s = line.strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return
+        inner = s[1:-1].strip()
+        if not inner.startswith(tag):
+            return
+        parts = inner[len(tag):].strip().split()
+        if len(parts) < 3:
+            return
+        rel, m_label, m_id = parts[0], parts[1], parts[2]
+        if m_label not in self._known_node_labels():
+            return
+        key = (rel, m_label, m_id, outgoing)
+        edges.setdefault(key, {
+            "rel": rel,
+            "m_label": m_label,
+            "m_id": m_id,
+            "outgoing": outgoing,
+        })
+
+    def _mark_staging_origin(self, line: str, tag: str, edges: dict,
+                             staging_origin: set, outgoing: bool):
         s = line.strip()
         if not (s.startswith("(") and s.endswith(")")):
             return
@@ -2414,15 +2441,9 @@ class MorkBackend:
         if len(parts) < 4:
             return
         rel, m_label, m_id = parts[0], parts[1], parts[2]
-        val = " ".join(parts[3:])
-        if m_label not in self._known_node_labels():
-            return
         key = (rel, m_label, m_id, outgoing)
-        info = edges.get(key)
-        if info is None:
-            return
-        # Last write wins for a given annotation type.
-        info[display_key] = val
+        if key in edges:
+            staging_origin.add(key)
 
     def describe_source(self, key: str) -> str:
         if not self._datasources:
