@@ -2254,8 +2254,10 @@ def _short(value: Any, limit: int = 80) -> str:
 
 
 def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
-    """Render a lookup result. Shared between Neo4jBackend and MorkBackend so
-    both backends produce byte-identical output for the same logical data."""
+    """Render a lookup result on a SINGLE LINE so it survives the IRC relay
+    (IRC truncates everything after the first newline). Connections are
+    separated by ' | '. Shared between Neo4jBackend and MorkBackend so both
+    backends produce byte-identical output for the same logical data."""
     first = rows[0]
     n_labels = first.get("n_labels") or []
     primary = _short(first.get("n_name") or name)
@@ -2270,9 +2272,9 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
         m_name = _short(r.get("m_name") or "?")
         m_kind = ",".join(m_labels) if m_labels else "?"
         arrow = "->" if r.get("outgoing") else "<-"
-        connections.append(f"  {arrow}[{rel}]{arrow[-1]} {m_name} ({m_kind})")
+        connections.append(f"{arrow}[{rel}]{arrow[-1]} {m_name} ({m_kind})")
 
-    indirect_lines = []
+    indirect_segs = []
     for r in (multihop_rows or []):
         edges = r.get("edge_types") or []
         via_labels = r.get("via_labels") or []
@@ -2284,11 +2286,12 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
         tgt_name = _short(r.get("m_name") or "?")
         tgt_label = r.get("m_label") or "?"
         via_part = f", via {via_pairs}" if via_pairs else ""
-        indirect_lines.append(f"  [{path}]→ {tgt_name} ({tgt_label}{via_part})")
+        indirect_segs.append(f"[{path}]→ {tgt_name} ({tgt_label}{via_part})")
 
-    if not connections and not indirect_lines:
+    if not connections and not indirect_segs:
         return f"Entity: {primary} ({kind}) — no connections in BioKG."
 
+    # Dedupe + cap direct connections so the relay line stays bounded.
     seen = set()
     deduped = []
     for c in connections:
@@ -2296,22 +2299,13 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
             seen.add(c)
             deduped.append(c)
     truncated = ""
-    if len(deduped) > 60:
-        truncated = f"\n  ... +{len(deduped)-60} more direct connections"
-        deduped = deduped[:60]
+    if len(deduped) > 30:
+        truncated = f" | +{len(deduped)-30} more"
+        deduped = deduped[:30]
 
-    out = (
-        f"Entity: {primary} ({kind})\n"
-        f"Direct connections ({len(deduped)} shown):\n"
-        + "\n".join(deduped)
-        + truncated
-    )
-    if indirect_lines:
-        out += (
-            f"\nIndirect connections via multi-hop schema paths "
-            f"({len(indirect_lines)} shown):\n"
-            + "\n".join(indirect_lines)
-        )
+    out = f"Entity: {primary} ({kind}) | direct ({len(deduped)}): " + " | ".join(deduped) + truncated
+    if indirect_segs:
+        out += " || indirect (" + str(len(indirect_segs)) + "): " + " | ".join(indirect_segs)
     return out
 
 

@@ -203,18 +203,12 @@ EXAMPLES
 # SIMPLE_FACT — RELAY VERBATIM (no prose synthesis)
 Q: peer (assistant-request): What does TP53 do?
 biokg-lookup TP53
-(next turn after RESULTS contain: Entity: TP53 (gene)
-Direct connections (20 shown):
-  ->[enables]> zinc ion binding (molecular_function)
-  ->[enables]> DNA binding (molecular_function)
-  ...)
-send Entity: TP53 (gene)
-Direct connections (20 shown):
-  ->[enables]> zinc ion binding (molecular_function)
-  ->[enables]> DNA binding (molecular_function)
-  ...
+(next turn after RESULTS contain a single-line connection summary)
+send Entity: TP53 (gene) | direct (20): ->[enables]> zinc ion binding (molecular_function) | ->[enables]> DNA binding (molecular_function) | ...
 
-The RESULTS block is already formatted. Copy it byte-for-byte after `send `.
+The RESULTS line is already formatted for the biocurator with ' | ' separators.
+Copy it byte-for-byte after `send `. Do NOT split into multiple lines. Do NOT
+rephrase. The output is intentionally single-line so it survives IRC relay.
 
 # PROVENANCE
 Q: peer (assistant-request): Where does the claim that TP53 enables DNA binding come from?
