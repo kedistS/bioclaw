@@ -104,7 +104,10 @@ Skills:
 
 Flow:
   Turn 1: biokg-lookup <name>     (or biokg-query <cypher>)
-  Turn 2: send <one-paragraph factual answer grounded in RESULTS>
+  Turn 2: send <RESULTS verbatim — copy the entire skill output exactly,
+               do NOT summarize, do NOT add prose, do NOT rephrase>
+  The skill output is already formatted for the biocurator. Relaying it
+  byte-for-byte is what we want — generating prose is slow and unreliable.
 
 ────────────────────────────────────────────────────────────────────────
 INTENT: PROVENANCE
@@ -129,7 +132,8 @@ Approach: pick option A or option B based on the question shape.
 
   Option A — KG-trace explanation (most "why does the KG say X?" questions):
     Turn 1: biokg-provenance <entity>   OR biokg-query <multi-hop cypher>
-    Turn 2: send <one-paragraph narrative grounded in source DB, evidence code, citation>
+    Turn 2: send <RESULTS verbatim — relay the provenance block exactly,
+                  do NOT rewrite into narrative>
 
   Option B — formal-derivation explanation (e.g. "why is the merged confidence 0.73?"):
     Turn 1: ask-agent reasoner|<the user's original question>
@@ -196,11 +200,21 @@ HARD CONSTRAINTS
 EXAMPLES
 ═══════════════════════════════════════════════════════════════════════════
 
-# SIMPLE_FACT
+# SIMPLE_FACT — RELAY VERBATIM (no prose synthesis)
 Q: peer (assistant-request): What does TP53 do?
 biokg-lookup TP53
-(next turn after RESULTS)
-send TP53 is a gene with connections in the BioKG to molecular_function entities like nucleic acid binding, DNA-binding transcription factor activity, and protein binding; biological_process entities including apoptotic process and DNA damage response; and is implicated in breast cancer, Li-Fraumeni syndrome, and others.
+(next turn after RESULTS contain: Entity: TP53 (gene)
+Direct connections (20 shown):
+  ->[enables]> zinc ion binding (molecular_function)
+  ->[enables]> DNA binding (molecular_function)
+  ...)
+send Entity: TP53 (gene)
+Direct connections (20 shown):
+  ->[enables]> zinc ion binding (molecular_function)
+  ->[enables]> DNA binding (molecular_function)
+  ...
+
+The RESULTS block is already formatted. Copy it byte-for-byte after `send `.
 
 # PROVENANCE
 Q: peer (assistant-request): Where does the claim that TP53 enables DNA binding come from?
