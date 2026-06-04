@@ -331,23 +331,31 @@ def describe_schema() -> str:
 
 
 def provenance(entity_name: str) -> str:
-    """Return provenance info for edges incident to entity_name.
+    """Return provenance info.
 
-    Reports both BioCypher source provenance (source DB, db_reference, evidence
-    code, reference, date) and BioClaw agent provenance (who staged/promoted).
+    Two forms:
+      - `biokg-provenance ENTITY`              → all edges incident to ENTITY
+      - `biokg-provenance SOURCE|EDGE|TARGET`  → just that one edge
 
-    The result is capped to BIOKG_PROVENANCE_LIMIT edges (default 8) to keep
-    the payload small enough for weak LLMs to relay reliably. Hub entities
-    like BRCA1 have dozens of incident edges; without a cap the relay
-    routinely chokes."""
-    name = str(entity_name).strip().strip('"').strip("'").strip()
-    if not name:
+    The targeted form is preferred when the biocurator names a specific edge
+    — it returns one line, never paraphrased into the wrong shape by the LLM."""
+    raw = str(entity_name).strip().strip('"').strip("'").strip()
+    if not raw:
         return "error: biokg-provenance requires an entity name"
+
+    if "|" in raw:
+        parts = [p.strip() for p in raw.split("|")]
+        if len(parts) != 3 or not all(parts):
+            return ("error: biokg-provenance pipe form must be "
+                    "SOURCE|EDGE_TYPE|TARGET")
+        src, edge, tgt = parts
+        return _get_backend().provenance(src, edge_type=edge, target=tgt)
+
     try:
         limit = int(os.environ.get("BIOKG_PROVENANCE_LIMIT", "8"))
     except (TypeError, ValueError):
         limit = 8
-    return _get_backend().provenance(name, limit=limit)
+    return _get_backend().provenance(raw, limit=limit)
 
 
 def describe_source(source_key: str) -> str:
@@ -718,7 +726,8 @@ class DisabledBackend:
     def describe_schema(self) -> str:
         return f"biokg unavailable ({self._reason})"
 
-    def provenance(self, name: str, limit: int = 8) -> str:
+    def provenance(self, name: str, limit: int = 8,
+                   edge_type: str = None, target: str = None) -> str:
         return f"biokg unavailable ({self._reason}); no provenance"
 
     def describe_source(self, key: str) -> str:
@@ -1025,7 +1034,8 @@ class Neo4jBackend:
                     "or install PyYAML + ensure /opt/bioclaw/config/schema.yaml exists.")
         return self._schema.summary()
 
-    def provenance(self, name: str, limit: int = 30) -> str:
+    def provenance(self, name: str, limit: int = 30,
+                   edge_type: str = None, target: str = None) -> str:
         """Return provenance for an entity. Covers two complementary kinds:
 
         1. **BioCypher source provenance** — node `source`/`source_url` and
@@ -2256,13 +2266,19 @@ class MorkBackend:
                     "+ ensure /opt/bioclaw/config/schema.yaml exists.")
         return self._schema.summary()
 
-    def provenance(self, name: str, limit: int = 5) -> str:
-        """Return the per-edge provenance for an entity's connections. Covers
-        both BioCypher annotations (source, evidence, db_reference) and BioClaw
-        agent annotations (staging_by, staging_status) when present.
+    def provenance(self, name: str, limit: int = 5,
+                   edge_type: str = None, target: str = None) -> str:
+        """Return per-edge provenance for an entity's connections.
 
-        Total MORK roundtrips scale linearly with `limit` (one annotation-pull
-        per shown edge), so keep limit small for IRC reliability."""
+        Two modes:
+          - `name` only: list all edges incident to `name`, capped to `limit`,
+            staging-origin first.
+          - `name` + `edge_type` + `target`: return provenance for ONLY that
+            one edge. Bypasses the broad enumeration entirely — one transform
+            per annotation, ~5 narrow queries total.
+
+        Covers both BioCypher annotations (source, evidence, db_reference) and
+        BioClaw agent annotations (staging_by, staging_status) when present."""
         import uuid
 
         entity = self._resolve_name(name)
@@ -2271,6 +2287,12 @@ class MorkBackend:
                     f"(tried properties: {', '.join(self._name_props)}).")
         label, eid = entity
         display_name = (self._resolve_id_to_name(label, eid) or name).replace("_", " ")
+
+        # ── Targeted path: provenance for ONE specific edge ────────────────
+        if edge_type and target:
+            return self._provenance_targeted(
+                label, eid, display_name, edge_type, target,
+            )
 
         # Step 1: enumerate all incident edges (both directions). One transform
         # per direction. We deliberately fetch ALL edges so we can prioritize
@@ -2406,6 +2428,85 @@ class MorkBackend:
         head = out[0]
         body = " | ".join(seg.strip() for seg in out[1:])
         return f"{head} | {body}"
+
+    def _provenance_targeted(self, s_label: str, s_id: str, s_display: str,
+                             edge_type: str, target_name: str) -> str:
+        """Provenance for one specific edge. Direct, narrow, IRC-friendly."""
+        import uuid
+
+        safe_edge_type = "".join(
+            c for c in str(edge_type).strip() if c.isalnum() or c == "_"
+        )
+        if not safe_edge_type:
+            return f"error: invalid edge_type {edge_type!r}"
+
+        tgt = self._resolve_name(target_name)
+        if not tgt:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        t_label, t_id = tgt
+        t_display = (self._resolve_id_to_name(t_label, t_id) or t_id).replace("_", " ")
+
+        edge_atom = f"({safe_edge_type} ({s_label} {s_id}) ({t_label} {t_id}))"
+
+        # Confirm the edge exists.
+        edge_probe = self._query(edge_atom, "matched")
+        if not any(h == "matched" for h in edge_probe):
+            return (f"No '{safe_edge_type}' edge from {s_label}:{s_display} to "
+                    f"{t_label}:{t_display} in BioKG.")
+
+        annotations = [
+            ("source", "edge source"),
+            ("evidence", "evidence"),
+            ("db_reference", "db_ref"),
+            ("staging_by", "_agent_by"),
+            ("staging_status", "_agent_status"),
+            ("staging_at", "_agent_at"),
+            ("staging_evidence", "_agent_evidence"),
+        ]
+        info = {}
+        for annotation, display_key in annotations:
+            tag = f"bioclaw_prov_one_{uuid.uuid4().hex[:8]}"
+            for line in self._transform(
+                patterns=[f"({annotation} {edge_atom} $val)"],
+                template=f"({tag} $val)",
+            ):
+                s = line.strip()
+                if not (s.startswith("(") and s.endswith(")")):
+                    continue
+                inner = s[1:-1].strip()
+                if not inner.startswith(tag):
+                    continue
+                val = inner[len(tag):].strip()
+                if val:
+                    info[display_key] = val
+                    break
+
+        line = (f"Provenance for ({s_label}:{s_display}) "
+                f"-[{safe_edge_type}]-> ({t_label}:{t_display}):")
+        biocypher_bits = []
+        for k in ("edge source", "db_ref", "evidence"):
+            v = info.get(k)
+            if v:
+                biocypher_bits.append(f"{k}={v}")
+        if biocypher_bits:
+            line += " [BioCypher: " + "; ".join(biocypher_bits) + "]"
+
+        agent_bits = []
+        if info.get("_agent_by"):
+            agent_bits.append(f"proposed by {info['_agent_by']}")
+        if info.get("_agent_at"):
+            agent_bits.append(f"at {info['_agent_at']}")
+        if info.get("_agent_status"):
+            agent_bits.append(f"status={info['_agent_status']}")
+        if info.get("_agent_evidence"):
+            agent_bits.append(f"evidence={info['_agent_evidence'].replace('_', ' ')}")
+        if agent_bits:
+            line += " [BioClaw: " + "; ".join(agent_bits) + "]"
+
+        if not biocypher_bits and not agent_bits:
+            line += " [no provenance recorded for this edge]"
+        return line
 
     def _record_provenance_edge(self, line: str, tag: str, outgoing: bool,
                                 edges: dict):

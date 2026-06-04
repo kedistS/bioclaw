@@ -119,9 +119,25 @@ Skills:
   biokg-provenance ENTITY  — full per-edge provenance (BioCypher source + BioClaw agent)
   biokg-source     KEY     — resolve a source token (gaf, GENCODE, etc.) to name + URL
 
+Skills (TWO FORMS — pick by whether the user named a specific edge):
+  biokg-provenance ENTITY                   — all edges incident to ENTITY
+  biokg-provenance SOURCE|EDGE|TARGET       — provenance for that ONE edge
+  biokg-source     KEY                      — resolve a source token to name + URL
+
+Use the pipe form when the user names a specific edge ("who said X enables Y",
+"source of X is_implicated_in Y", "evidence for BRCA1 enables zinc ion binding").
+The targeted form returns one line, exact, no LLM grep across many edges.
+
+Use the ENTITY form only when the user asks broadly ("provenance for TP53",
+"what sources cover BRCA1").
+
 Flow:
-  Turn 1: biokg-provenance <entity>   (or biokg-source <token>)
-  Turn 2: send <relay relevant entries verbatim — preserve source URLs, PMIDs, evidence codes>
+  Turn 1: biokg-provenance BRCA1|enables|zinc ion binding    (when edge named)
+       or biokg-provenance BRCA1                              (when broad)
+  Turn 2: send <RESULTS verbatim>
+          NEVER editorialize. NEVER say "no edge found" when the skill just
+          returned a capped list — the result IS what the skill returned,
+          relay it byte-for-byte.
 
 ────────────────────────────────────────────────────────────────────────
 INTENT: EXPLANATION
@@ -210,11 +226,17 @@ The RESULTS line is already formatted for the biocurator with ' | ' separators.
 Copy it byte-for-byte after `send `. Do NOT split into multiple lines. Do NOT
 rephrase. The output is intentionally single-line so it survives IRC relay.
 
-# PROVENANCE
-Q: peer (assistant-request): Where does the claim that TP53 enables DNA binding come from?
+# PROVENANCE — specific edge (use pipe form)
+Q: peer (assistant-request): Who said TP53 enables DNA binding?
+biokg-provenance TP53|enables|DNA binding
+(next turn after RESULTS)
+send <RESULTS verbatim — the skill already formatted the one-line answer>
+
+# PROVENANCE — broad (use ENTITY form)
+Q: peer (assistant-request): Show me all the sources behind TP53.
 biokg-provenance TP53
-(next turn)
-send For (gene:TP53) -[enables]-> (molecular_function:DNA binding): source=GOA, db_reference=PMID:15358771, evidence_code=IDA (Inferred from Direct Assay).
+(next turn after RESULTS)
+send <RESULTS verbatim — the skill caps to N edges, sorted staging-first>
 
 # EXPLANATION (KG-trace)
 Q: peer (assistant-request): Why does the KG say BRCA1 is implicated in breast cancer?
