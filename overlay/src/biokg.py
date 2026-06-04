@@ -1891,8 +1891,8 @@ class MorkBackend:
         # collide on a persistent read-zipper at the same location.
         import uuid
         tag_suffix = uuid.uuid4().hex[:12]
-        out_tag = f"__bioclaw_lookup_out_{tag_suffix}"
-        in_tag  = f"__bioclaw_lookup_in_{tag_suffix}"
+        out_tag = f"bioclaw_lookup_out_{tag_suffix}"
+        in_tag  = f"bioclaw_lookup_in_{tag_suffix}"
         scratch_out = f"({out_tag} $edge $m_label $m_id $name_prop $m_name)"
         scratch_in  = f"({in_tag} $edge $m_label $m_id $name_prop $m_name)"
 
@@ -2056,7 +2056,7 @@ class MorkBackend:
         # The edge atom as a literal pattern. Joined with all source +
         # evidence annotations in a single transform.
         edge_atom = f"({safe_edge_type} ({s_label} {s_id}) ({t_label} {t_id}))"
-        tag = f"__bioclaw_merge_{uuid.uuid4().hex[:12]}"
+        tag = f"bioclaw_merge_{uuid.uuid4().hex[:12]}"
         scratch = f"({tag} $src $ev)"
 
         raw = self._transform(
@@ -2154,8 +2154,8 @@ class MorkBackend:
 
         # Two transforms: one for each direction the target node can occupy
         # in the edge. Each joins the edge atom with its source annotation.
-        in_tag = f"__bioclaw_agg_in_{uuid.uuid4().hex[:12]}"
-        out_tag = f"__bioclaw_agg_out_{uuid.uuid4().hex[:12]}"
+        in_tag = f"bioclaw_agg_in_{uuid.uuid4().hex[:12]}"
+        out_tag = f"bioclaw_agg_out_{uuid.uuid4().hex[:12]}"
 
         # Direction: target is the SECOND endpoint of the edge.
         edge_in = f"({safe_edge_type} ($o_label $o_id) ({t_label} {t_id}))"
