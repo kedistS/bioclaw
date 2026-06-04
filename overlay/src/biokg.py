@@ -2096,8 +2096,10 @@ class MorkBackend:
         if not self._upload_atoms(atoms):
             return f"error: could not upload staged edge to MORK"
 
-        return (f"[STAGED edge {sid}] ({s_label}:{s_id}) "
-                f"-[{safe_edge_type}]-> ({t_label}:{t_id}) "
+        src_display = (self._resolve_id_to_name(s_label, s_id) or s_id).replace("_", " ")
+        tgt_display = (self._resolve_id_to_name(t_label, t_id) or t_id).replace("_", " ")
+        return (f"[STAGED edge {sid}] ({s_label}:{src_display}) "
+                f"-[{safe_edge_type}]-> ({t_label}:{tgt_display}) "
                 f"by {agent_word}, evidence: {evidence!r}")
 
     # ─── biokg-list-staging ────────────────────────────────────────────────
@@ -2138,10 +2140,13 @@ class MorkBackend:
 
         if len(rows) > limit:
             rows = rows[:limit]
-        segs = [
-            f"[{sid}] {s_l}:{s_id} -{et}-> {t_l}:{t_id} by {agent} ({ev})"
-            for sid, et, s_l, s_id, t_l, t_id, agent, ev in rows
-        ]
+        segs = []
+        for sid, et, s_l, s_id, t_l, t_id, agent, ev in rows:
+            src_name = (self._resolve_id_to_name(s_l, s_id) or s_id).replace("_", " ")
+            tgt_name = (self._resolve_id_to_name(t_l, t_id) or t_id).replace("_", " ")
+            segs.append(
+                f"[{sid}] {s_l}:{src_name} -{et}-> {t_l}:{tgt_name} by {agent} ({ev})"
+            )
         return f"{len(rows)} pending: " + " | ".join(segs)
 
     # ─── biokg-promote ─────────────────────────────────────────────────────
@@ -2340,16 +2345,30 @@ class MorkBackend:
             ):
                 self._merge_provenance_row(line, tag2, False, edges, display_key)
 
-        # Step 3: format
+        # Step 3: format. Sort so staging-origin edges (proposed via BioClaw)
+        # appear first — same fix shape as the lookup ORDER BY.
+        def _sort_key(item):
+            key, info = item
+            has_staging = 1 if (info.get("_agent_by") or info.get("_agent_status")) else 0
+            return (-has_staging, info.get("rel", ""), info.get("m_id", ""))
+        edge_items = sorted(edges.items(), key=_sort_key)
+
+        # Also resolve neighbor display names so the output reads as names,
+        # not raw IDs.
         out = [f"Provenance for {label}:{display_name} ({len(edges)} edges):"]
         rendered = 0
-        for key, info in edges.items():
+        for key, info in edge_items:
             if rendered >= limit:
                 break
+            m_display = (
+                self._resolve_id_to_name(info["m_label"], info["m_id"])
+                or info["m_id"]
+            ).replace("_", " ")
+            info["m_display"] = m_display
             arrow = "->" if info["outgoing"] else "<-"
             line = (
                 f"  {arrow}[{info['rel']}]{arrow[-1]} "
-                f"({info['m_label']}:{info['m_id']})"
+                f"({info['m_label']}:{info.get('m_display', info['m_id'])})"
             )
 
             biocypher_bits = []
