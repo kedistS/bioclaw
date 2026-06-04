@@ -1969,23 +1969,274 @@ class MorkBackend:
         # analogue; a per-edge-type probing strategy is the planned port.
         return _format_lookup_result(name, rows, multihop_rows=None)
 
-    # ─── stubs for the rest of the skills (port in follow-up) ──────────────
-    def query(self, qs: str) -> str:
-        return ("biokg-query against MORK is not yet ported. "
-                "Use biokg-lookup for direct entity exploration.")
+    # ─── write helpers ─────────────────────────────────────────────────────
+    def _upload_atoms(self, atoms: list) -> bool:
+        """Upload atoms to MORK via /upload. Returns True on success.
 
-    def stage_edge(self, *args, **kwargs) -> str:
-        return ("biokg mork backend: staging not yet ported. "
-                "Stay on BIOKG_BACKEND=neo4j to propose new edges.")
+        Each atom is a MeTTa s-expression string. We use pattern '$x' and
+        template '(<namespace> $x)' so MORK reads each atom and wraps it in
+        the namespace before storing."""
+        import urllib.parse
+        import urllib.request
+        if not atoms:
+            return True
+        pattern = "$x"
+        template = self._wrap("$x")
+        url = (
+            f"{self._uri}/upload/"
+            f"{urllib.parse.quote(pattern)}/"
+            f"{urllib.parse.quote(template)}/"
+        )
+        data = "\n".join(atoms).encode()
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "text/plain",
+                "User-Agent": "curl/7.81.0",
+                "Accept": "*/*",
+            },
+            method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=self._timeout).read().decode()
+        except Exception:
+            return False
+        if "Permission error" in resp or "ServerPermissionErr" in resp:
+            return False
+        return True
 
+    def _clear_pattern(self, pattern: str) -> bool:
+        """Remove atoms from MORK matching `pattern`. Returns True on success."""
+        import urllib.parse
+        import urllib.request
+        url = (
+            f"{self._uri}/clear/"
+            f"{urllib.parse.quote(self._wrap(pattern))}/"
+        )
+        try:
+            urllib.request.urlopen(url, timeout=self._timeout).read()
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _now_iso() -> str:
+        """Compact ISO timestamp safe to use as a MeTTa atom argument."""
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    @staticmethod
+    def _safe_atom_word(text: str) -> str:
+        """Make free text safe as a single MeTTa atom token."""
+        s = str(text or "").strip()
+        if not s:
+            return "no_evidence"
+        # Spaces → underscores; strip parens; keep [A-Za-z0-9_.-:]
+        s = s.replace(" ", "_")
+        out = []
+        for ch in s:
+            if ch.isalnum() or ch in "_.-:/":
+                out.append(ch)
+        return "".join(out) or "no_evidence"
+
+    # ─── biokg-stage ───────────────────────────────────────────────────────
+    def stage_edge(self, source_name: str, edge_type: str, target_name: str,
+                   evidence: str = "", confidence: float = 0.7,
+                   agent: str = "specialist") -> str:
+        """Stage a new edge as a candidate awaiting human approval.
+
+        Writes the edge atom + a set of staging_* annotation atoms. The edge
+        is invisible to PLN merge / lookup until biokg-promote flips its
+        status from pending to promoted."""
+        import uuid
+        safe_edge_type = "".join(
+            c for c in str(edge_type).strip() if c.isalnum() or c == "_"
+        )
+        if not safe_edge_type:
+            return f"error: invalid edge_type {edge_type!r}"
+
+        if self._schema is not None and safe_edge_type not in self._schema.edges:
+            known = ", ".join(sorted(self._schema.edges)) or "(none)"
+            return (f"error: edge type {safe_edge_type!r} is not in the loaded "
+                    f"BioCypher schema. Known edge types: {known}")
+
+        src = self._resolve_name(source_name)
+        if not src:
+            return (f"error: source entity {source_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        s_label, s_id = src
+
+        tgt = self._resolve_name(target_name)
+        if not tgt:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        t_label, t_id = tgt
+
+        if self._schema is not None:
+            ok, reason = self._schema.validate_edge(safe_edge_type, s_label, t_label)
+            if not ok:
+                return f"error: schema validation failed: {reason}"
+
+        sid = uuid.uuid4().hex[:8]
+        ts = self._now_iso()
+        ev_word = self._safe_atom_word(evidence)
+        agent_word = self._safe_atom_word(agent or "specialist")
+
+        edge = f"({safe_edge_type} ({s_label} {s_id}) ({t_label} {t_id}))"
+        atoms = [
+            edge,
+            f"(staging_id {edge} {sid})",
+            f"(staging_by {edge} {agent_word})",
+            f"(staging_at {edge} {ts})",
+            f"(staging_evidence {edge} {ev_word})",
+            f"(staging_confidence {edge} {float(confidence)})",
+            f"(staging_status {edge} pending)",
+        ]
+        if not self._upload_atoms(atoms):
+            return f"error: could not upload staged edge to MORK"
+
+        return (f"[STAGED edge {sid}] ({s_label}:{s_id}) "
+                f"-[{safe_edge_type}]-> ({t_label}:{t_id}) "
+                f"by {agent_word}, evidence: {evidence!r}")
+
+    # ─── biokg-list-staging ────────────────────────────────────────────────
     def list_staging(self, limit: int = 50) -> str:
-        return "biokg mork backend: staging area not yet ported"
+        """One-line listing of all pending staged proposals."""
+        import uuid
+        tag = f"bioclaw_list_staging_{uuid.uuid4().hex[:12]}"
+        # Decompose the edge atom in the patterns so the projection has
+        # flat tokens (easier to parse in Python).
+        edge_pat = "($et ($s_l $s_id) ($t_l $t_id))"
+        raw = self._transform(
+            patterns=[
+                f"(staging_status {edge_pat} pending)",
+                f"(staging_id {edge_pat} $sid)",
+                f"(staging_by {edge_pat} $agent)",
+                f"(staging_evidence {edge_pat} $ev)",
+            ],
+            template=f"({tag} $sid $et $s_l $s_id $t_l $t_id $agent $ev)",
+        )
 
-    def promote(self, sid: str) -> str:
-        return "biokg mork backend: promote not yet ported"
+        rows = []
+        for line in raw:
+            s = line.strip()
+            if not (s.startswith("(") and s.endswith(")")):
+                continue
+            inner = s[1:-1].strip()
+            if not inner.startswith(tag):
+                continue
+            rest = inner[len(tag):].strip().split()
+            if len(rest) < 8:
+                continue
+            sid, et, s_l, s_id, t_l, t_id, agent = rest[:7]
+            ev = " ".join(rest[7:]).replace("_", " ")
+            rows.append((sid, et, s_l, s_id, t_l, t_id, agent, ev))
 
-    def reject(self, sid: str) -> str:
-        return "biokg mork backend: reject not yet ported"
+        if not rows:
+            return "Staging area is empty — no pending proposals."
+
+        if len(rows) > limit:
+            rows = rows[:limit]
+        segs = [
+            f"[{sid}] {s_l}:{s_id} -{et}-> {t_l}:{t_id} by {agent} ({ev})"
+            for sid, et, s_l, s_id, t_l, t_id, agent, ev in rows
+        ]
+        return f"{len(rows)} pending: " + " | ".join(segs)
+
+    # ─── biokg-promote ─────────────────────────────────────────────────────
+    def promote(self, staging_id: str) -> str:
+        """Flip a pending staged edge to promoted status."""
+        import uuid
+        sid = str(staging_id).strip().rstrip(".")
+        tag = f"bioclaw_promote_lookup_{uuid.uuid4().hex[:12]}"
+        edge_pat = "($et ($s_l $s_id) ($t_l $t_id))"
+        raw = self._transform(
+            patterns=[
+                f"(staging_id {edge_pat} {sid})",
+                f"(staging_status {edge_pat} pending)",
+            ],
+            template=f"({tag} $et $s_l $s_id $t_l $t_id)",
+        )
+
+        edge_info = None
+        for line in raw:
+            s = line.strip()
+            if not (s.startswith("(") and s.endswith(")")):
+                continue
+            inner = s[1:-1].strip()
+            if not inner.startswith(tag):
+                continue
+            parts = inner[len(tag):].strip().split()
+            if len(parts) >= 5:
+                edge_info = tuple(parts[:5])
+                break
+
+        if not edge_info:
+            return f"error: no pending proposal with id {sid!r}"
+
+        et, s_l, s_id, t_l, t_id = edge_info
+        edge = f"({et} ({s_l} {s_id}) ({t_l} {t_id}))"
+        ts = self._now_iso()
+
+        self._clear_pattern(f"(staging_status {edge} pending)")
+        self._upload_atoms([
+            f"(staging_status {edge} promoted)",
+            f"(staging_promoted_at {edge} {ts})",
+        ])
+
+        # Invalidate the lookup cache so the promoted edge shows immediately.
+        with _cache_lock:
+            _cache.clear()
+
+        return f"Promoted [{sid}] (edge type {et}) into BioKG; provenance retained."
+
+    # ─── biokg-reject ──────────────────────────────────────────────────────
+    def reject(self, staging_id: str) -> str:
+        """Discard a staged edge — clear the edge atom and all its annotations."""
+        import uuid
+        sid = str(staging_id).strip().rstrip(".")
+        tag = f"bioclaw_reject_lookup_{uuid.uuid4().hex[:12]}"
+        edge_pat = "($et ($s_l $s_id) ($t_l $t_id))"
+        raw = self._transform(
+            patterns=[f"(staging_id {edge_pat} {sid})"],
+            template=f"({tag} $et $s_l $s_id $t_l $t_id)",
+        )
+
+        edge_info = None
+        for line in raw:
+            s = line.strip()
+            if not (s.startswith("(") and s.endswith(")")):
+                continue
+            inner = s[1:-1].strip()
+            if not inner.startswith(tag):
+                continue
+            parts = inner[len(tag):].strip().split()
+            if len(parts) >= 5:
+                edge_info = tuple(parts[:5])
+                break
+
+        if not edge_info:
+            return f"error: no proposal with id {sid!r}"
+
+        et, s_l, s_id, t_l, t_id = edge_info
+        edge = f"({et} ({s_l} {s_id}) ({t_l} {t_id}))"
+
+        for annotation in (
+            "staging_id", "staging_by", "staging_at",
+            "staging_evidence", "staging_confidence",
+            "staging_status", "staging_promoted_at",
+        ):
+            self._clear_pattern(f"({annotation} {edge} $v)")
+        self._clear_pattern(edge)
+
+        return f"Rejected [{sid}] (edge type {et}) — discarded."
+
+    # ─── biokg-query (raw cypher passthrough not available on MORK) ────────
+    def query(self, qs: str) -> str:
+        return ("biokg-query against MORK is not implemented. "
+                "MORK uses MeTTa pattern queries, not Cypher. "
+                "Use biokg-lookup for direct entity exploration.")
 
     def describe_schema(self) -> str:
         if self._schema is None:
@@ -1994,7 +2245,165 @@ class MorkBackend:
         return self._schema.summary()
 
     def provenance(self, name: str, limit: int = 8) -> str:
-        return "biokg mork backend: provenance not yet ported"
+        """Return the per-edge provenance for an entity's connections. Covers
+        both BioCypher annotations (source, evidence, db_reference) and BioClaw
+        agent annotations (staging_by, staging_status, staging_at) when present.
+
+        One transform per annotation type — joined with the edge in each, then
+        merged in Python."""
+        import uuid
+
+        entity = self._resolve_name(name)
+        if not entity:
+            return (f"No entity matching {name!r} found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        label, eid = entity
+        display_name = (self._resolve_id_to_name(label, eid) or name).replace("_", " ")
+
+        # Step 1: get all edges incident to the entity (both directions),
+        # keyed by (edge_type, m_label, m_id, outgoing).
+        edges = {}  # key -> {"rel": str, "m_label": str, "m_id": str, "outgoing": bool, "bits": [], "agent": {}}
+
+        tag_o = f"bioclaw_prov_out_{uuid.uuid4().hex[:12]}"
+        tag_i = f"bioclaw_prov_in_{uuid.uuid4().hex[:12]}"
+        for line in self._transform(
+            patterns=[f"($edge ({label} {eid}) ($m_label $m_id))"],
+            template=f"({tag_o} $edge $m_label $m_id)",
+        ):
+            s = line.strip()
+            if not (s.startswith("(") and s.endswith(")")):
+                continue
+            inner = s[1:-1].strip()
+            if not inner.startswith(tag_o):
+                continue
+            parts = inner[len(tag_o):].strip().split()
+            if len(parts) < 3:
+                continue
+            rel, m_label, m_id = parts[0], parts[1], parts[2]
+            if m_label not in self._known_node_labels():
+                continue
+            key = (rel, m_label, m_id, True)
+            edges.setdefault(key, {"rel": rel, "m_label": m_label, "m_id": m_id,
+                                   "outgoing": True, "bits": [], "agent": {}})
+
+        for line in self._transform(
+            patterns=[f"($edge ($m_label $m_id) ({label} {eid}))"],
+            template=f"({tag_i} $edge $m_label $m_id)",
+        ):
+            s = line.strip()
+            if not (s.startswith("(") and s.endswith(")")):
+                continue
+            inner = s[1:-1].strip()
+            if not inner.startswith(tag_i):
+                continue
+            parts = inner[len(tag_i):].strip().split()
+            if len(parts) < 3:
+                continue
+            rel, m_label, m_id = parts[0], parts[1], parts[2]
+            if m_label not in self._known_node_labels():
+                continue
+            key = (rel, m_label, m_id, False)
+            edges.setdefault(key, {"rel": rel, "m_label": m_label, "m_id": m_id,
+                                   "outgoing": False, "bits": [], "agent": {}})
+
+        if not edges:
+            return f"Provenance for {label}:{display_name}: no connected edges in BioKG."
+
+        # Step 2: for each annotation type, run one transform joining the
+        # edge with that annotation. Annotate rows in `edges`.
+        annotation_pairs = [
+            ("source", "edge source"),
+            ("evidence", "evidence"),
+            ("db_reference", "db_ref"),
+            ("staging_by", "_agent_by"),
+            ("staging_status", "_agent_status"),
+            ("staging_at", "_agent_at"),
+            ("staging_evidence", "_agent_evidence"),
+        ]
+        for annotation, display_key in annotation_pairs:
+            tag = f"bioclaw_prov_{annotation}_{uuid.uuid4().hex[:8]}"
+            # outgoing direction
+            for line in self._transform(
+                patterns=[
+                    f"({annotation} ($et ({label} {eid}) ($m_label $m_id)) $val)",
+                ],
+                template=f"({tag} $et $m_label $m_id $val)",
+            ):
+                self._merge_provenance_row(line, tag, True, edges, display_key)
+            # incoming direction
+            tag2 = f"{tag}_in"
+            for line in self._transform(
+                patterns=[
+                    f"({annotation} ($et ($m_label $m_id) ({label} {eid})) $val)",
+                ],
+                template=f"({tag2} $et $m_label $m_id $val)",
+            ):
+                self._merge_provenance_row(line, tag2, False, edges, display_key)
+
+        # Step 3: format
+        out = [f"Provenance for {label}:{display_name} ({len(edges)} edges):"]
+        rendered = 0
+        for key, info in edges.items():
+            if rendered >= limit:
+                break
+            arrow = "->" if info["outgoing"] else "<-"
+            line = (
+                f"  {arrow}[{info['rel']}]{arrow[-1]} "
+                f"({info['m_label']}:{info['m_id']})"
+            )
+
+            biocypher_bits = []
+            for k in ("edge source", "db_ref", "evidence"):
+                v = info.get(k)
+                if v:
+                    biocypher_bits.append(f"{k}={v}")
+            if biocypher_bits:
+                line += "  [BioCypher: " + "; ".join(biocypher_bits) + "]"
+
+            agent_bits = []
+            if info.get("_agent_by"):
+                agent_bits.append(f"proposed by {info['_agent_by']}")
+            if info.get("_agent_at"):
+                agent_bits.append(f"at {info['_agent_at']}")
+            if info.get("_agent_status"):
+                agent_bits.append(f"status={info['_agent_status']}")
+            if info.get("_agent_evidence"):
+                agent_bits.append(f"evidence={info['_agent_evidence'].replace('_', ' ')}")
+            if agent_bits:
+                line += "  [BioClaw: " + "; ".join(agent_bits) + "]"
+
+            if not biocypher_bits and not agent_bits:
+                line += "  [no provenance recorded]"
+
+            out.append(line)
+            rendered += 1
+
+        # Join with " | " — single line for IRC relay.
+        head = out[0]
+        body = " | ".join(seg.strip() for seg in out[1:])
+        return f"{head} | {body}"
+
+    def _merge_provenance_row(self, line: str, tag: str, outgoing: bool,
+                              edges: dict, display_key: str):
+        s = line.strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return
+        inner = s[1:-1].strip()
+        if not inner.startswith(tag):
+            return
+        parts = inner[len(tag):].strip().split()
+        if len(parts) < 4:
+            return
+        rel, m_label, m_id = parts[0], parts[1], parts[2]
+        val = " ".join(parts[3:])
+        if m_label not in self._known_node_labels():
+            return
+        key = (rel, m_label, m_id, outgoing)
+        info = edges.get(key)
+        if info is None:
+            return
+        # Last write wins for a given annotation type.
+        info[display_key] = val
 
     def describe_source(self, key: str) -> str:
         if not self._datasources:
