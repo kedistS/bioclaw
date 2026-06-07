@@ -115,6 +115,7 @@ services:
       - "RPC_ROLE=assistant"
       - "RPC_PORT=8080"
     volumes:
+      - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - assistant-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
@@ -146,6 +147,7 @@ services:
       - "RPC_ROLE=reasoner"
       - "RPC_PORT=8080"
     volumes:
+      - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
       - reasoner-memory:/PeTTa/repos/OmegaClaw-Core/memory
     tmpfs:
