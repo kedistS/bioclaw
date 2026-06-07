@@ -176,7 +176,14 @@ _SPAM_PATTERNS = [
 
 # Internal-monologue starters — the LLM thinking out loud rather than producing
 # user-facing content. Drop sends that begin with these.
+#
+# Also catches LLM "acknowledgment" patterns where the model verbally responds
+# to a system directive (e.g. " DO NOT RE-SEND OR SPAM!" spam-shield feedback)
+# instead of doing the next skill call. With weak/medium LLMs (Minimax,
+# DeepSeek-chat, DeepSeek-reasoner) this is a major failure mode — the model
+# answers feedback as if it were a user instruction, blocking real work.
 _MONOLOGUE_STARTS = (
+    # — original internal-monologue patterns —
     "i should ",
     "i need to ",
     "i will ",
@@ -202,6 +209,44 @@ _MONOLOGUE_STARTS = (
     "no output: ",
     "(no output",
     "(empty turn",
+    # — acknowledgment patterns — LLM responding verbally instead of acting —
+    "acknowledged.",
+    "acknowledged,",
+    "understood.",
+    "understood,",
+    "noted.",
+    "noted,",
+    "got it.",
+    "got it,",
+    "i understand.",
+    "i understand,",
+    "i'll wait",
+    "i will wait",
+    "i'm ready",
+    "i am ready",
+    "i'll not",
+    "i will not re-send",
+    "i will not spam",
+    "okay!",
+    "ok,",
+    "ok!",
+    # — meta-commentary patterns — LLM narrating what's happening in RESULTS —
+    "i see the results",
+    "i see results",
+    "we see from results",
+    "looking at the results",
+    "the results contain",
+    "results contain",
+    "from the results",
+    "in the results",
+    "the previous attempt",
+    "the previous response",
+    "the previous turn",
+    "the current request is",
+    "the current turn",
+    # — Hi-again / repeated-greeting patterns from chatty LLMs —
+    "hi again",
+    "hello again",
 )
 
 
