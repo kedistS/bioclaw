@@ -77,6 +77,10 @@ services:
       - "IRC_port=${IRC_PORT:-6667}"
       - "IRC_user=${IRC_USER:-bioclaw}"
     volumes:
+      # Full lib_llm_ext.py (image's in-built version is a 3 KB stub missing
+      # callProvider — runtime git-import was the only thing restoring it,
+      # and that path is unreliable. Track the working copy here.)
+      - ./overlay/lib_llm_ext.py:/PeTTa/repos/OmegaClaw-Core/lib_llm_ext.py:ro
       # Patched main loop: rephrases the spam-shield directive so weaker LLMs
       # stop verbally acknowledging it instead of relaying RESULTS.
       - ./overlay/core/loop.metta:/PeTTa/repos/OmegaClaw-Core/src/loop.metta:ro
