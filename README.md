@@ -86,6 +86,13 @@ skills add deterministic truth-value math on top.
 | `show staging` | Conductor only | `biokg-list-staging` |
 | `approve <hex>` / `reject <hex>` | Conductor only | `biokg-promote` / `biokg-reject` |
 
+Lookup replies are capped by `BIOKG_MAX_CONNECTIONS` (default `20`) so IRC and
+LLM contexts stay readable. The count in a lookup response means "returned in
+this lookup", not necessarily the entity's total number of KG edges. Displayed
+examples are chosen deterministically by code: recognizable biology terms such
+as DNA binding, chromatin binding, p53 binding, zinc ion binding, protein
+binding, and cancer/process terms are shown first, then shorter ontology names.
+
 Three skills still in the backlog are exposed as safe Phase 2 limitation
 responses, not active reasoning implementations:
 

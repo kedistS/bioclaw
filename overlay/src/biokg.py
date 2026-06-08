@@ -2935,8 +2935,17 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
             f"{_sentence_group_label(group)}: {len(values)} direct annotation(s); examples include "
             + _human_join(shown)
         )
+    try:
+        max_conn = int(os.environ.get("BIOKG_MAX_CONNECTIONS", "20"))
+    except (TypeError, ValueError):
+        max_conn = 20
+    cap_note = (
+        f" showing up to {max_conn} to keep the chat readable"
+        if total >= max_conn else
+        " in this lookup"
+    )
     if rendered:
-        out += f" BioKG has {total} direct annotation(s) for it. " + " | ".join(rendered)
+        out += f" BioKG returned {total} direct annotation(s){cap_note}. " + " | ".join(rendered)
     if indirect_segs:
         indirect_segs = _dedupe_preserve_order(indirect_segs)
         shown = indirect_segs[:5]
@@ -2994,6 +3003,12 @@ def _lookup_group(rel: str, target_label: str, outgoing: bool) -> str:
 
 
 def _readable_examples(values: list, limit: int) -> list:
+    """Choose deterministic examples for compact display.
+
+    We do not ask an LLM to choose. The ranking first prefers recognizable
+    biology terms that are useful in demos, then falls back to shorter names
+    before longer ontology labels.
+    """
     values = _dedupe_preserve_order([_clean_display_name(v) for v in values if v])
     values.sort(key=_readability_rank)
     return values[:limit]
