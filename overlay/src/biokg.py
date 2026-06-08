@@ -484,6 +484,14 @@ class Schema:
             elif represented == "edge":
                 # output_label wins over input_label for Neo4j relationship type.
                 rel = body.get("output_label") or body.get("input_label") or name
+                aliases = [
+                    rel,
+                    body.get("input_label"),
+                    body.get("output_label"),
+                    name,
+                    _schema_token(name),
+                ]
+                aliases = [str(a).strip() for a in aliases if str(a or "").strip()]
                 sources = body.get("source")
                 targets = body.get("target")
                 if sources is None or targets is None:
@@ -492,6 +500,7 @@ class Schema:
                     "sources": [self._entity_label(s) for s in _aslist(sources)],
                     "targets": [self._entity_label(t) for t in _aslist(targets)],
                     "entity_name": name,
+                    "aliases": sorted(set(aliases)),
                 }
 
     def _resolve_name_property(self, entity_name: str, _seen=None) -> str:
@@ -614,6 +623,16 @@ def _schema_edges_between(schema: Optional[Schema], target_label: str,
         elif target_label in targets and neighbor_label in sources:
             out.append(edge_label)
     return sorted(set(out))
+
+
+def _schema_edge_aliases(schema: Optional[Schema], edge_label: str) -> set:
+    aliases = {str(edge_label).strip()} if str(edge_label or "").strip() else set()
+    if schema is None:
+        return aliases
+    edge = schema.edges.get(edge_label)
+    if edge:
+        aliases.update(str(a).strip() for a in edge.get("aliases", []) if str(a).strip())
+    return aliases
 
 
 class DataSources:
@@ -2884,6 +2903,7 @@ class MorkBackend:
         )
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r}"
+        edge_aliases = _schema_edge_aliases(self._schema, safe_edge_type)
         safe_neighbor_label = None
         if neighbor_label:
             safe_neighbor_label = "".join(
@@ -2975,11 +2995,11 @@ class MorkBackend:
                     if len(parts) < 3:
                         continue
                     found_edge, o_label, o_id = parts[0], parts[1], " ".join(parts[2:])
-                    if found_edge != safe_edge_type:
+                    if found_edge not in edge_aliases:
                         continue
                     if safe_neighbor_label and o_label != safe_neighbor_label:
                         continue
-                    edge_rows.append((direction, o_label, o_id))
+                    edge_rows.append((direction, found_edge, o_label, o_id))
                     if edge_limit > 0 and len(edge_rows) >= edge_limit:
                         fallback_capped = True
                         break
@@ -2987,15 +3007,15 @@ class MorkBackend:
                     break
 
             seen_edges = set()
-            for direction, o_label, o_id in edge_rows:
-                edge_key = (direction, o_label, o_id)
+            for direction, found_edge, o_label, o_id in edge_rows:
+                edge_key = (direction, found_edge, o_label, o_id)
                 if edge_key in seen_edges:
                     continue
                 seen_edges.add(edge_key)
                 if direction == "in":
-                    edge_atom = f"({safe_edge_type} ({o_label} {o_id}) ({t_label} {t_id}))"
+                    edge_atom = f"({found_edge} ({o_label} {o_id}) ({t_label} {t_id}))"
                 else:
-                    edge_atom = f"({safe_edge_type} ({t_label} {t_id}) ({o_label} {o_id}))"
+                    edge_atom = f"({found_edge} ({t_label} {t_id}) ({o_label} {o_id}))"
                 src_tag = f"bioclaw_agg_src_{uuid.uuid4().hex[:12]}"
                 raw_sources = self._transform(
                     patterns=[f"(source {edge_atom} $src)"],
