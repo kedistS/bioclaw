@@ -2955,11 +2955,14 @@ class MorkBackend:
             except (TypeError, ValueError):
                 edge_limit = 1000
 
-            for direction, edge_pattern in (("in", edge_in), ("out", edge_out)):
+            for direction, edge_pattern in (
+                ("in", f"($edge ($o_label $o_id) ({t_label} {t_id}))"),
+                ("out", f"($edge ({t_label} {t_id}) ($o_label $o_id))"),
+            ):
                 edge_tag = f"bioclaw_agg_edge_{direction}_{uuid.uuid4().hex[:12]}"
                 raw_edges = self._transform(
                     patterns=[edge_pattern],
-                    template=f"({edge_tag} $o_label $o_id)",
+                    template=f"({edge_tag} $edge $o_label $o_id)",
                 )
                 for line in raw_edges:
                     s = line.strip()
@@ -2969,9 +2972,11 @@ class MorkBackend:
                     if not inner.startswith(edge_tag):
                         continue
                     parts = inner[len(edge_tag):].strip().split()
-                    if len(parts) < 2:
+                    if len(parts) < 3:
                         continue
-                    o_label, o_id = parts[0], parts[1]
+                    found_edge, o_label, o_id = parts[0], parts[1], " ".join(parts[2:])
+                    if found_edge != safe_edge_type:
+                        continue
                     if safe_neighbor_label and o_label != safe_neighbor_label:
                         continue
                     edge_rows.append((direction, o_label, o_id))
