@@ -2947,6 +2947,84 @@ class MorkBackend:
                 )
                 per_source.setdefault(src, []).append(c)
 
+        fallback_capped = False
+        if not per_source:
+            edge_rows = []
+            try:
+                edge_limit = int(os.environ.get("BIOKG_SOURCE_AGGREGATE_EDGE_LIMIT", "1000"))
+            except (TypeError, ValueError):
+                edge_limit = 1000
+
+            for direction, edge_pattern in (("in", edge_in), ("out", edge_out)):
+                edge_tag = f"bioclaw_agg_edge_{direction}_{uuid.uuid4().hex[:12]}"
+                raw_edges = self._transform(
+                    patterns=[edge_pattern],
+                    template=f"({edge_tag} $o_label $o_id)",
+                )
+                for line in raw_edges:
+                    s = line.strip()
+                    if not (s.startswith("(") and s.endswith(")")):
+                        continue
+                    inner = s[1:-1].strip()
+                    if not inner.startswith(edge_tag):
+                        continue
+                    parts = inner[len(edge_tag):].strip().split()
+                    if len(parts) < 2:
+                        continue
+                    o_label, o_id = parts[0], parts[1]
+                    if safe_neighbor_label and o_label != safe_neighbor_label:
+                        continue
+                    edge_rows.append((direction, o_label, o_id))
+                    if edge_limit > 0 and len(edge_rows) >= edge_limit:
+                        fallback_capped = True
+                        break
+                if fallback_capped:
+                    break
+
+            seen_edges = set()
+            for direction, o_label, o_id in edge_rows:
+                edge_key = (direction, o_label, o_id)
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+                if direction == "in":
+                    edge_atom = f"({safe_edge_type} ({o_label} {o_id}) ({t_label} {t_id}))"
+                else:
+                    edge_atom = f"({safe_edge_type} ({t_label} {t_id}) ({o_label} {o_id}))"
+                src_tag = f"bioclaw_agg_src_{uuid.uuid4().hex[:12]}"
+                raw_sources = self._transform(
+                    patterns=[f"(source {edge_atom} $src)"],
+                    template=f"({src_tag} $src)",
+                )
+                found_source = False
+                for line in raw_sources:
+                    s = line.strip()
+                    if not (s.startswith("(") and s.endswith(")")):
+                        continue
+                    inner = s[1:-1].strip()
+                    if not inner.startswith(src_tag):
+                        continue
+                    src = inner[len(src_tag):].strip() or "(no-source)"
+                    key = (o_label, o_id, src)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    _f, c = _evidence_stv(
+                        None, src, edge_confidence=None, edge_score=None,
+                    )
+                    per_source.setdefault(src, []).append(c)
+                    found_source = True
+                if not found_source:
+                    src = "(no-source)"
+                    key = (o_label, o_id, src)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    _f, c = _evidence_stv(
+                        None, src, edge_confidence=None, edge_score=None,
+                    )
+                    per_source.setdefault(src, []).append(c)
+
         if not per_source:
             scope = f" through {safe_neighbor_label} nodes" if safe_neighbor_label else ""
             return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}{scope}. "
@@ -2963,6 +3041,10 @@ class MorkBackend:
             cmax = max(confs)
             src_segs.append(_format_source_stat(src, len(confs), mean_c, cmax))
             stvs.append((1.0, mean_c))
+        if fallback_capped:
+            src_segs.append(
+                f"edge scan capped at {os.environ.get('BIOKG_SOURCE_AGGREGATE_EDGE_LIMIT', '1000')} edge(s)"
+            )
 
         sources_str = " + ".join(src_segs)
 
