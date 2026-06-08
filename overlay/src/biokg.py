@@ -283,7 +283,7 @@ def lookup(name: str) -> str:
         and not result.startswith(("error:", "biokg unavailable", "biokg neo4j error"))
         and "no connections in BioKG" not in result
         and "No entity matching" not in result
-        and ("|" in result or "->" in result or "<-" in result)
+        and ("BioKG direct annotations:" in result or "|" in result or "->" in result or "<-" in result)
     )
     if cacheable:
         with _cache_lock:
@@ -1768,6 +1768,23 @@ class MorkBackend:
             return None
         return edge, m_label, m_id, m_name
 
+    def _parse_lookup_edge_row(self, s: str, tag: str):
+        """Parse '(<tag> <edge> <m_label> <m_id>)' for legacy lookup fallback."""
+        s = s.strip()
+        if not (s.startswith("(") and s.endswith(")")):
+            return None
+        inner = s[1:-1].strip()
+        if not inner.startswith(tag):
+            return None
+        rest = inner[len(tag):].strip()
+        parts = rest.split()
+        if len(parts) < 3:
+            return None
+        edge, m_label, m_id = parts[0], parts[1], " ".join(parts[2:])
+        if m_label not in self._known_node_labels():
+            return None
+        return edge, m_label, m_id
+
     def _known_node_labels(self):
         if not hasattr(self, "_known_labels_cache"):
             self._known_labels_cache = set(self._candidate_labels())
@@ -1956,6 +1973,9 @@ class MorkBackend:
             if parsed:
                 raw_edges.append(parsed + (False,))
 
+        if not raw_edges:
+            raw_edges = self._legacy_lookup_edges(label, eid, max_conn)
+
         # Same neighbor may still appear multiple times if its node has
         # multiple legitimate name properties (e.g. a gene with both
         # gene_name and a synonym). Collapse on (edge, m_label, m_id) and
@@ -1996,6 +2016,51 @@ class MorkBackend:
         # Cypher's variable-length pattern matching which has no direct MORK
         # analogue; a per-edge-type probing strategy is the planned port.
         return _format_lookup_result(name, rows, multihop_rows=None)
+
+    def _legacy_lookup_edges(self, label: str, eid: str, max_conn: int) -> list:
+        """Fallback for MORK stores where the name-property join is too strict.
+
+        Older demo images used this simpler direct-edge projection and then
+        resolved neighbor IDs one by one. It is less elegant than the joined
+        path, but it is reliable for BioKG demo questions like "what does TP53
+        do?" where GO-term IDs can be resolved through term_name atoms.
+        """
+        import uuid
+        tag_suffix = uuid.uuid4().hex[:12]
+        out_tag = f"bioclaw_lookup_legacy_out_{tag_suffix}"
+        in_tag = f"bioclaw_lookup_legacy_in_{tag_suffix}"
+
+        outgoing_raw = self._transform(
+            patterns=[f"($edge ({label} {eid}) ($m_label $m_id))"],
+            template=f"({out_tag} $edge $m_label $m_id)",
+        )
+        incoming_raw = self._transform(
+            patterns=[f"($edge ($m_label $m_id) ({label} {eid}))"],
+            template=f"({in_tag} $edge $m_label $m_id)",
+        )
+
+        raw_edges = []
+        for line in outgoing_raw:
+            parsed = self._parse_lookup_edge_row(line, out_tag)
+            if parsed:
+                raw_edges.append(parsed + (True,))
+        for line in incoming_raw:
+            parsed = self._parse_lookup_edge_row(line, in_tag)
+            if parsed:
+                raw_edges.append(parsed + (False,))
+
+        deduped = []
+        seen = set()
+        for edge, m_label, m_id, outgoing in raw_edges:
+            key = (edge, m_label, m_id, outgoing)
+            if key in seen:
+                continue
+            seen.add(key)
+            m_name = self._resolve_id_to_name(m_label, m_id) or m_id
+            deduped.append((edge, m_label, m_id, m_name, outgoing))
+            if len(deduped) >= max_conn:
+                break
+        return deduped
 
     # ─── write helpers ─────────────────────────────────────────────────────
     def _upload_atoms(self, atoms: list) -> bool:
