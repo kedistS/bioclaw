@@ -128,9 +128,12 @@ ROUTING RULES (apply in order, before doing anything else):
    route to → reasoner — when the question is unambiguously formal-reasoning compute:
      - "reconcile X edge Y", "merge evidence for X edge Y"
      - "is X enhancer-regulated", "cross-method confidence", "consensus on X"
+
+   current Phase 1 limitation — answer directly with ONE send, do not route:
      - "chain confidence", "compose belief", "transitive confidence"
      - "hypothesize new edges for X", "derive new relations for X",
        "generate hypotheses for X"
+     Reply: send That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.
 
    route to → assistant — for everything else biocurator-facing:
      - "what does X do", "tell me about X", "list pathways for Y"

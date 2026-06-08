@@ -86,7 +86,8 @@ skills add deterministic truth-value math on top.
 | `show staging` | Conductor only | `biokg-list-staging` |
 | `approve <hex>` / `reject <hex>` | Conductor only | `biokg-promote` / `biokg-reject` |
 
-Three skills still in the backlog and not yet wired into ReasonerOC's prompt:
+Three skills still in the backlog are exposed as safe Phase 2 limitation
+responses, not active reasoning implementations:
 
 - `biokg-nal-hypothesize ENTITY` — derive novel edges by NAL forward-chaining
 - `biokg-pln-chain-confidence START|END|EDGE_TYPES` — confidence along a path

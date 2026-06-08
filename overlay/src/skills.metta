@@ -17,12 +17,12 @@
     ;PEER AGENTS:
     "- Delegate a sub-task to a specialist agent and wait for its reply."
     "  Format: ask-agent ROLE|QUERY    (ROLE and QUERY separated by a pipe)"
-    "  ROLE is one of: query, annotation"
+    "  ROLE is one of: assistant, reasoner"
     "  Do NOT wrap the whole thing in quotes. Do NOT escape quotes inside QUERY."
     "  The call returns a string starting with [ROLE-agent replied ...]: <text>."
     "  When you see that result, your NEXT action MUST be: send <text>"
-    "  Example call:    ask-agent annotation|Annotate gene TP53 with function tumor suppressor"
-    "  Example follow-up: send Annotation: TP53 acts as a tumor suppressor by ..."
+    "  Example call:    ask-agent assistant|What does TP53 do?"
+    "  Example follow-up: send Entity: TP53 (gene) | direct ..."
     ;BIO KNOWLEDGE GRAPH (read):
     "- Look up a biological entity by name in the BioKG. Single argument: biokg-lookup NAME"
     "  Returns a connectivity summary (labels + connected entities) or a 'not found' message."
@@ -158,6 +158,15 @@
 
 (= (biokg-pln-source-aggregate $combined)
    (py-call (biokg.pln_source_aggregate_pipe $combined)))
+
+(= (biokg-pln-chain-confidence $combined)
+   "That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.")
+
+(= (biokg-pln-compose-belief $question)
+   "That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.")
+
+(= (biokg-nal-hypothesize $entity)
+   "That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.")
 
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 

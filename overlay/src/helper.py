@@ -260,6 +260,15 @@ def _looks_like_spam(text: str) -> bool:
     return any(p.match(stripped) for p in _SPAM_PATTERNS)
 
 
+def _is_staged_edge_reply(text: str) -> bool:
+    return "[STAGED edge " in text
+
+
+def _is_approval_instruction(text: str) -> bool:
+    lower = text.strip().lower()
+    return lower.startswith("to approve, reply:")
+
+
 def sanitize_llm_response(raw: str) -> str:
     """Strip wrapper bleed and auto-wrap orphan prose. See module docstring."""
     if not isinstance(raw, str):
@@ -279,6 +288,7 @@ def sanitize_llm_response(raw: str) -> str:
     #    is restated 3-5 times. Hard-capping here makes the rule enforced
     #    rather than aspirational.
     send_count = 0
+    kept_staged_edge_reply = False
     out_lines = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -313,9 +323,15 @@ def sanitize_llm_response(raw: str) -> str:
                     continue   # drop echoed system warnings
                 if _looks_like_monologue(body_inspect):
                     continue   # drop LLM internal-monologue commentary
-                send_count += 1
-                if send_count > 1:
+                if send_count >= 1 and not (
+                    send_count == 1
+                    and kept_staged_edge_reply
+                    and _is_approval_instruction(body_inspect)
+                ):
                     continue   # already emitted one send this turn — drop the rest
+                send_count += 1
+                if _is_staged_edge_reply(body_inspect):
+                    kept_staged_edge_reply = True
             out_lines.append(raw_line)
         else:
             # Orphan prose. Auto-wrap as send so the user sees the content
@@ -479,6 +495,16 @@ def test_balance_parenthesis():
     # 18. "(no output - ..." parenthesized comments get dropped
     noop2 = balance_parentheses('(no output - no new HUMAN_MESSAGE)')
     assert noop2 == '()', f"got: {noop2}"
+
+    # 19. Staged-edge replies intentionally need a second approval instruction.
+    staged = balance_parentheses(
+        'send [STAGED edge a1b2c3d4] (gene:TP53) -[enables]-> (molecular_function:DNA binding)\n'
+        'send To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4.'
+    )
+    assert staged == (
+        '((send "[STAGED edge a1b2c3d4] (gene:TP53) -[enables]-> (molecular_function:DNA binding)") '
+        '(send "To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4."))'
+    ), f"got: {staged}"
 
 
 if __name__ == "__main__":
