@@ -72,6 +72,47 @@ def _reasoner_fast_path(query: str):
     return None
 
 
+def _assistant_fast_path(query: str):
+    """Handle deterministic AssistantOC lookup templates without an LLM hop."""
+    q = str(query).strip()
+    q_norm = re.sub(r"\s+", " ", q).strip()
+    q_lower = q_norm.lower().rstrip("?.!")
+
+    patterns = (
+        r"^what\s+does\s+(.+?)\s+do$",
+        r"^tell\s+me\s+about\s+(.+)$",
+        r"^what\s+is\s+(.+)$",
+        r"^show\s+me\s+(.+)$",
+    )
+    for pattern in patterns:
+        m = re.match(pattern, q_lower)
+        if not m:
+            continue
+        # Preserve original capitalization where possible by slicing the
+        # normalized query with the same simple prefix/suffix structure.
+        entity = _extract_lookup_entity(q_norm, pattern, m.group(1))
+        if entity:
+            import biokg
+            return biokg.lookup(entity)
+    return None
+
+
+def _extract_lookup_entity(q_norm: str, pattern: str, lower_entity: str) -> str:
+    # The user mostly asks compact biomedical symbols; for those, find the
+    # case-preserved token span in the normalized query. Fall back to the
+    # lowercased regex capture when necessary.
+    words = q_norm.rstrip("?.!").split()
+    if pattern.startswith("^what\\s+does") and len(words) >= 4:
+        return " ".join(words[2:-1]).strip()
+    if pattern.startswith("^tell\\s+me\\s+about") and len(words) >= 4:
+        return " ".join(words[3:]).strip()
+    if pattern.startswith("^what\\s+is") and len(words) >= 3:
+        return " ".join(words[2:]).strip()
+    if pattern.startswith("^show\\s+me") and len(words) >= 3:
+        return " ".join(words[2:]).strip()
+    return str(lower_entity).strip()
+
+
 def ask(role, query, timeout=None):
     """Synchronously ask a peer specialist agent and return its reply text."""
     role = str(role).strip().lower()
@@ -85,6 +126,10 @@ def ask(role, query, timeout=None):
 
     if role == "reasoner":
         reply = _reasoner_fast_path(query)
+        if reply is not None:
+            return _relay(role, reply)
+    elif role == "assistant":
+        reply = _assistant_fast_path(query)
         if reply is not None:
             return _relay(role, reply)
 
