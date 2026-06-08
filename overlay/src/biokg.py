@@ -2822,18 +2822,18 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
     first = rows[0]
     n_labels = first.get("n_labels") or []
     primary = _short(first.get("n_name") or name)
-    kind = ",".join(n_labels) if n_labels else "?"
+    kind = _friendly_label(n_labels[0] if n_labels else "?")
 
-    connections = []
+    groups = {}
     for r in rows:
         rel = r.get("rel")
         if not rel:
             continue
         m_labels = r.get("m_labels") or []
-        m_name = _short(r.get("m_name") or "?")
-        m_kind = ",".join(m_labels) if m_labels else "?"
-        arrow = "->" if r.get("outgoing") else "<-"
-        connections.append(f"{arrow}[{rel}]{arrow[-1]} {m_name} ({m_kind})")
+        m_label = m_labels[0] if m_labels else "?"
+        m_name = _short(r.get("m_name") or "?", 72)
+        group = _lookup_group(rel, m_label, r.get("outgoing"))
+        groups.setdefault(group, []).append(m_name)
 
     indirect_segs = []
     for r in (multihop_rows or []):
@@ -2847,26 +2847,85 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
         tgt_name = _short(r.get("m_name") or "?")
         tgt_label = r.get("m_label") or "?"
         via_part = f", via {via_pairs}" if via_pairs else ""
-        indirect_segs.append(f"[{path}]→ {tgt_name} ({tgt_label}{via_part})")
+        indirect_segs.append(f"{tgt_name} ({_friendly_label(tgt_label)} via {path}{via_part})")
 
-    if not connections and not indirect_segs:
+    if not groups and not indirect_segs:
         return f"Entity: {primary} ({kind}) — no connections in BioKG."
 
-    # Dedupe + cap direct connections so the relay line stays bounded.
-    seen = set()
-    deduped = []
-    for c in connections:
-        if c not in seen:
-            seen.add(c)
-            deduped.append(c)
-    truncated = ""
-    if len(deduped) > 30:
-        truncated = f" | +{len(deduped)-30} more"
-        deduped = deduped[:30]
-
-    out = f"Entity: {primary} ({kind}) | direct ({len(deduped)}): " + " | ".join(deduped) + truncated
+    out = f"{primary} is a {kind}. BioKG direct annotations:"
+    group_order = [
+        "Molecular functions",
+        "Biological processes",
+        "Pathways",
+        "Diseases and phenotypes",
+        "Regulatory associations",
+        "Gene products",
+        "Other links",
+    ]
+    rendered = []
+    total = 0
+    for group in group_order:
+        values = groups.get(group, [])
+        if not values:
+            continue
+        values = _dedupe_preserve_order(values)
+        total += len(values)
+        shown = values[:8]
+        more = f"; +{len(values) - len(shown)} more" if len(values) > len(shown) else ""
+        rendered.append(f"{group} ({len(values)}): " + "; ".join(shown) + more)
+    if rendered:
+        out += f" {total} total. " + " | ".join(rendered)
     if indirect_segs:
-        out += " || indirect (" + str(len(indirect_segs)) + "): " + " | ".join(indirect_segs)
+        indirect_segs = _dedupe_preserve_order(indirect_segs)
+        shown = indirect_segs[:5]
+        more = f"; +{len(indirect_segs) - len(shown)} more" if len(indirect_segs) > len(shown) else ""
+        out += " | Related by 2-hop paths: " + "; ".join(shown) + more
+    return out
+
+
+def _friendly_label(label: str) -> str:
+    label = str(label or "?")
+    mapping = {
+        "gene": "gene",
+        "protein": "protein",
+        "transcript": "transcript",
+        "molecular_function": "molecular function",
+        "biological_process": "biological process",
+        "cellular_component": "cellular component",
+        "pathway": "pathway",
+        "disease": "disease",
+        "phenotype": "phenotype",
+        "enhancer": "enhancer",
+    }
+    return mapping.get(label, label.replace("_", " "))
+
+
+def _lookup_group(rel: str, target_label: str, outgoing: bool) -> str:
+    rel = str(rel or "").lower()
+    target_label = str(target_label or "").lower()
+    if target_label == "molecular_function" or rel == "enables":
+        return "Molecular functions"
+    if target_label == "biological_process" or rel in ("involved_in", "participates_in"):
+        return "Biological processes"
+    if target_label == "pathway":
+        return "Pathways"
+    if target_label in ("disease", "phenotype") or rel in ("is_implicated_in", "has_phenotype"):
+        return "Diseases and phenotypes"
+    if target_label == "enhancer" or rel in ("associated_with", "regulates"):
+        return "Regulatory associations"
+    if target_label in ("protein", "transcript") or rel in ("translates_to", "transcribes_to"):
+        return "Gene products"
+    return "Other links"
+
+
+def _dedupe_preserve_order(values: list) -> list:
+    seen = set()
+    out = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
     return out
 
 
