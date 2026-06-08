@@ -141,6 +141,7 @@ _DROP_LINE_PATTERNS = [
     re.compile(r"^\s*\(?\s*empty\s*\)?\s*$", re.IGNORECASE),    # empty / (empty)
     re.compile(r"^\s*\(?\s*none\s*\)?\s*$", re.IGNORECASE),     # none / (none)
     re.compile(r"^\s*\(?\s*null\s*\)?\s*$", re.IGNORECASE),     # null / (null)
+    re.compile(r"^\s*\(?\s*no\s+output\s*\)?\s*$", re.IGNORECASE),  # no output / (no output)
     re.compile(r"^\s*\{\s*\"name\"\s*:\s*\".*?\"\s*,?\s*"),    # {"name": "...",
     re.compile(r"^\s*\"name\"\s*:"),                           # leftover "name":
     re.compile(r"^\s*\"arguments\"\s*:"),                      # leftover "arguments":
@@ -194,6 +195,7 @@ _MONOLOGUE_STARTS = (
     "based on the ",
     "according to ",
     "the instruction ",
+    "the user is asking",
     "the user's message",
     "the user said",
     "the previous request",
@@ -207,6 +209,7 @@ _MONOLOGUE_STARTS = (
     "no output - ",
     "no output -",
     "no output: ",
+    "no output",
     "(no output",
     "(empty turn",
     # — acknowledgment patterns — LLM responding verbally instead of acting —
@@ -496,7 +499,15 @@ def test_balance_parenthesis():
     noop2 = balance_parentheses('(no output - no new HUMAN_MESSAGE)')
     assert noop2 == '()', f"got: {noop2}"
 
-    # 19. Staged-edge replies intentionally need a second approval instruction.
+    # 19. Bare "(no output)" from Minimax idle turns is dropped.
+    noop3 = balance_parentheses('(no output)')
+    assert noop3 == '()', f"got: {noop3}"
+
+    # 20. Meta-analysis prose from Minimax idle turns is dropped.
+    meta = balance_parentheses('send The user is asking me to analyze the situation and provide the correct output.')
+    assert meta == '()', f"got: {meta}"
+
+    # 21. Staged-edge replies intentionally need a second approval instruction.
     staged = balance_parentheses(
         'send [STAGED edge a1b2c3d4] (gene:TP53) -[enables]-> (molecular_function:DNA binding)\n'
         'send To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4.'
