@@ -435,6 +435,23 @@ def pln_source_aggregate_pipe(combined: str) -> str:
     return _get_backend().pln_source_aggregate(target, edge_type, neighbor_label)
 
 
+def pln_schema_neighbor_aggregate_pipe(combined: str) -> str:
+    """Schema-derived source aggregate. Format: TARGET_NAME|NEIGHBOR_LABEL
+
+    Resolves TARGET_NAME, finds the loaded schema edge connecting the target's
+    node label to NEIGHBOR_LABEL, then delegates to pln_source_aggregate with
+    the resolved edge type and neighbor-label filter. This keeps natural
+    relationship phrases generic instead of hardcoding one edge type per phrase.
+    """
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) != 2 or not all(parts):
+        return ("error: biokg-pln-schema-neighbor-aggregate format is TARGET_NAME|NEIGHBOR_LABEL.\n"
+                "Example: biokg-pln-schema-neighbor-aggregate TARGET_ENTITY|NEIGHBOR_LABEL")
+    target, neighbor_label = parts
+    return _get_backend().pln_schema_neighbor_aggregate(target, neighbor_label)
+
+
 # ─── BioCypher schema loader ────────────────────────────────────────────────
 # Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
 #   entities[label] = { name_prop, all_labels (incl. inherited) }
@@ -562,6 +579,41 @@ def _aslist(x):
     if isinstance(x, list):
         return [str(v).strip() for v in x]
     return [str(x).strip()]
+
+
+def _schema_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+
+
+def _schema_label_for_phrase(schema: Optional[Schema], phrase: str) -> Optional[str]:
+    """Resolve a human phrase like 'biological process' to a loaded node label."""
+    if schema is None:
+        return None
+    wanted = _schema_token(phrase)
+    if not wanted:
+        return None
+    for label, info in schema.entities.items():
+        if _schema_token(label) == wanted:
+            return label
+        if _schema_token(info.get("entity_name", "")) == wanted:
+            return label
+    return None
+
+
+def _schema_edges_between(schema: Optional[Schema], target_label: str,
+                          neighbor_label: str) -> list:
+    """Return schema edge labels connecting target_label and neighbor_label."""
+    if schema is None:
+        return []
+    out = []
+    for edge_label, edge in schema.edges.items():
+        sources = set(edge.get("sources") or [])
+        targets = set(edge.get("targets") or [])
+        if target_label in sources and neighbor_label in targets:
+            out.append(edge_label)
+        elif target_label in targets and neighbor_label in sources:
+            out.append(edge_label)
+    return sorted(set(out))
 
 
 class DataSources:
@@ -755,6 +807,9 @@ class DisabledBackend:
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         return f"biokg unavailable ({self._reason}); cannot run PLN source aggregate"
 
+    def pln_schema_neighbor_aggregate(self, target_name: str, neighbor_label: str) -> str:
+        return f"biokg unavailable ({self._reason}); cannot run schema-derived source aggregate"
+
 
 class Neo4jBackend:
     """Neo4j-backed KG. Speaks Cypher."""
@@ -796,6 +851,16 @@ class Neo4jBackend:
             raise RuntimeError("NEO4J_URI and NEO4J_PASSWORD must be set")
         db = os.environ.get("NEO4J_DATABASE", "neo4j").strip() or "neo4j"
         return cls(uri, user, pwd, db)
+
+    def _resolve_label(self, name: str) -> Optional[str]:
+        match_clauses = " OR ".join(f"toLower(n.{p}) = toLower($name)" for p in self._name_props)
+        cypher = f"MATCH (n) WHERE {match_clauses} RETURN labels(n)[0] AS label LIMIT 1"
+        try:
+            with self._driver.session(database=self._database) as session:
+                row = session.run(cypher, name=str(name).strip()).single()
+        except Exception:
+            return None
+        return row["label"] if row else None
 
     def lookup(self, name: str) -> str:
         # Match the entity on any of the candidate name properties. Then resolve
@@ -1431,6 +1496,25 @@ class Neo4jBackend:
             f"BioKG found {len(sources)} evidence sources for {edge_phrase}: {sources_str}. "
             f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
         )
+
+    def pln_schema_neighbor_aggregate(self, target_name: str, neighbor_label: str) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded; specify the edge type explicitly."
+        target_label = self._resolve_label(target_name)
+        if not target_label:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        resolved_neighbor = _schema_label_for_phrase(self._schema, neighbor_label)
+        if not resolved_neighbor:
+            return f"error: neighbor label {neighbor_label!r} is not in the loaded BioCypher schema."
+        edges = _schema_edges_between(self._schema, target_label, resolved_neighbor)
+        if not edges:
+            return (f"error: schema has no edge connecting {target_label!r} and "
+                    f"{resolved_neighbor!r}; specify the edge type explicitly.")
+        if len(edges) > 1:
+            return (f"error: schema has multiple edges connecting {target_label!r} and "
+                    f"{resolved_neighbor!r}: {', '.join(edges)}. Specify the edge type explicitly.")
+        return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
 
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all edges of EDGE_TYPE incident to TARGET.
@@ -2765,6 +2849,26 @@ class MorkBackend:
         cmp_op = ">=" if c_m >= 0.5 else "<"
         return (f"BioKG found {len(sources_info)} evidence sources for {edge_phrase}: {sources_str}. "
                 f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}.")
+
+    def pln_schema_neighbor_aggregate(self, target_name: str, neighbor_label: str) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded; specify the edge type explicitly."
+        target_entity = self._resolve_name(target_name)
+        if not target_entity:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        target_label, _target_id = target_entity
+        resolved_neighbor = _schema_label_for_phrase(self._schema, neighbor_label)
+        if not resolved_neighbor:
+            return f"error: neighbor label {neighbor_label!r} is not in the loaded BioCypher schema."
+        edges = _schema_edges_between(self._schema, target_label, resolved_neighbor)
+        if not edges:
+            return (f"error: schema has no edge connecting {target_label!r} and "
+                    f"{resolved_neighbor!r}; specify the edge type explicitly.")
+        if len(edges) > 1:
+            return (f"error: schema has multiple edges connecting {target_label!r} and "
+                    f"{resolved_neighbor!r}: {', '.join(edges)}. Specify the edge type explicitly.")
+        return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
 
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all EDGE_TYPE edges incident to TARGET.

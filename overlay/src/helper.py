@@ -110,6 +110,7 @@ KNOWN_SKILLS = {
     "biokg-provenance", "biokg-source",
     "biokg-recent-autonomous",
     "biokg-pln-evidence-merge", "biokg-pln-source-aggregate",
+    "biokg-pln-schema-neighbor-aggregate",
     "biokg-pln-chain-confidence", "biokg-pln-compose-belief",
     "biokg-nal-hypothesize",
     # MeTTa eval (raw NAL/PLN escape hatch)

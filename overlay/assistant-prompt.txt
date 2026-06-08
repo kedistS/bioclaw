@@ -178,8 +178,9 @@ Flow:
 ────────────────────────────────────────────────────────────────────────
 INTENT: DELEGATE_FORMAL
 ────────────────────────────────────────────────────────────────────────
-Phrases: "reconcile", "merge evidence for X", "is X enhancer-regulated",
-         "cross-method confidence", "consensus on X", "aggregate evidence"
+Phrases: "reconcile", "merge evidence for X", "aggregate evidence for X via edge_type",
+         "cross-method confidence", "consensus on X", schema-neighbor relationship
+         phrases such as "is X enhancer-regulated"
 
 Action: forward the question to ReasonerOC. Do not attempt formal reasoning yourself.
 

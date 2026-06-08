@@ -126,7 +126,10 @@ For cross-method consensus around a target node:
 
 Enhancer-regulation questions use the filtered form
 `GENE_SYMBOL|associated_with|enhancer` so non-regulatory `associated_with`
-sources are not mixed into enhancer evidence.
+sources are not mixed into enhancer evidence. The reasoning primitive itself is
+not enhancer-specific: explicit requests can aggregate any schema edge type with
+multiple sources, and natural relationship phrases can use
+`TARGET|NEIGHBOR_LABEL` schema-derived routing to find the connecting edge.
 
 The TOKEN FIDELITY rule in both the Conductor and Reasoner prompts ensures
 `stv(f, c)` values are copied byte-for-byte through the relay chain. They're

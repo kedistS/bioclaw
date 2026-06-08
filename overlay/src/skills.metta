@@ -78,6 +78,11 @@
     "  edges but both methods say YES with quantifiable confidence. PLN merge"
     "  produces one cross-method confidence number."
     "  Example: biokg-pln-source-aggregate TARGET_ENTITY|associated_with|enhancer"
+    "- Schema-derived source aggregate. Format: biokg-pln-schema-neighbor-aggregate TARGET_NAME|NEIGHBOR_LABEL"
+    "  Resolves TARGET_NAME's node label, finds the schema edge connecting it to"
+    "  NEIGHBOR_LABEL, then runs the same source aggregate with that edge and"
+    "  neighbor-label filter. Use this for natural relationship phrases when"
+    "  the edge type is implied by the loaded schema."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -159,6 +164,9 @@
 
 (= (biokg-pln-source-aggregate $combined)
    (py-call (biokg.pln_source_aggregate_pipe $combined)))
+
+(= (biokg-pln-schema-neighbor-aggregate $combined)
+   (py-call (biokg.pln_schema_neighbor_aggregate_pipe $combined)))
 
 (= (biokg-pln-chain-confidence $combined)
    "That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.")

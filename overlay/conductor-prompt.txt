@@ -127,7 +127,8 @@ ROUTING RULES (apply in order, before doing anything else):
 
    route to → reasoner — when the question is unambiguously formal-reasoning compute:
      - "reconcile X edge Y", "merge evidence for X edge Y"
-     - "is X enhancer-regulated", "cross-method confidence", "consensus on X"
+     - "aggregate evidence for X via edge_type", "cross-method confidence", "consensus on X"
+     - schema-neighbor relationship phrases such as "is X enhancer-regulated"
 
    current Phase 1 limitation — answer directly with ONE send, do not route:
      - "chain confidence", "compose belief", "transitive confidence"

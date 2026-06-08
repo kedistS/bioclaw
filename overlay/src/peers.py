@@ -52,12 +52,13 @@ def _reasoner_fast_path(query: str):
     q_norm = re.sub(r"\s+", " ", q).strip()
     q_lower = q_norm.lower().rstrip("?.!")
 
-    # "is GENE_SYMBOL enhancer-regulated?" -> GENE_SYMBOL|associated_with|enhancer
-    m = re.match(r"^(?:is|are)\s+(.+?)\s+enhancer[-\s]?regulated$", q_lower)
-    if m:
-        target = q_norm.split()[1]
+    aggregate = _source_aggregate_request(q_norm)
+    if aggregate:
         import biokg
-        return biokg.pln_source_aggregate_pipe(f"{target}|associated_with|enhancer")
+        mode, values = aggregate
+        if mode == "schema-neighbor":
+            return biokg.pln_schema_neighbor_aggregate_pipe("|".join(values))
+        return biokg.pln_source_aggregate_pipe("|".join(values))
 
     # "reconcile SOURCE EDGE_TYPE TARGET" -> SOURCE|EDGE_TYPE|TARGET
     for prefix in ("reconcile ", "merge evidence for "):
@@ -69,6 +70,46 @@ def _reasoner_fast_path(query: str):
                 import biokg
                 return biokg.pln_evidence_merge_pipe(f"{source}|{edge_type}|{target}")
 
+    return None
+
+
+def _source_aggregate_request(text: str):
+    q = re.sub(r"\s+", " ", str(text)).strip().rstrip("?.!")
+    m = re.match(
+        r"^(?:source[-\s]?aggregate|aggregate sources|aggregate evidence|cross-method confidence|consensus)"
+        r"\s+(?:for|on)\s+(.+?)\s+(?:via|using)\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s+(?:through|with|neighbor)\s+([A-Za-z][A-Za-z0-9_\-\s]*))?$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, edge_type, neighbor = m.groups()
+        values = [target.strip(), edge_type.strip()]
+        if neighbor:
+            values.append(neighbor.strip())
+        return "edge", values
+
+    m = re.match(
+        r"^aggregate\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:for|on)\s+(.+?)"
+        r"(?:\s+(?:through|with|neighbor)\s+([A-Za-z][A-Za-z0-9_\-\s]*))?$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        edge_type, target, neighbor = m.groups()
+        values = [target.strip(), edge_type.strip()]
+        if neighbor:
+            values.append(neighbor.strip())
+        return "edge", values
+
+    m = re.match(
+        r"^(?:is|are)\s+(.+?)\s+([A-Za-z][A-Za-z0-9_\-\s]*?)[-\s]?(?:regulated|associated|linked|connected)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, neighbor = m.groups()
+        return "schema-neighbor", [target.strip(), neighbor.strip()]
     return None
 
 

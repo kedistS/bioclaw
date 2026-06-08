@@ -52,10 +52,13 @@ def route_human_message(msg: str) -> str:
         import biokg
         return _send(biokg.pln_evidence_merge_pipe("|".join(edge)))
 
-    target = _enhancer_target(text)
-    if target:
+    aggregate = _source_aggregate_request(text)
+    if aggregate:
         import biokg
-        return _send(biokg.pln_source_aggregate_pipe(f"{target}|associated_with|enhancer"))
+        mode, values = aggregate
+        if mode == "schema-neighbor":
+            return _send(biokg.pln_schema_neighbor_aggregate_pipe("|".join(values)))
+        return _send(biokg.pln_source_aggregate_pipe("|".join(values)))
 
     staged = _stage_request(text)
     if staged:
@@ -110,10 +113,44 @@ def _edge_question(text: str, prefixes: tuple):
     return None
 
 
-def _enhancer_target(text: str) -> str:
+def _source_aggregate_request(text: str):
     q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
-    m = re.match(r"^(?:is|are)\s+(.+?)\s+enhancer[-\s]?regulated$", q, flags=re.IGNORECASE)
-    return m.group(1).strip() if m else ""
+    m = re.match(
+        r"^(?:source[-\s]?aggregate|aggregate sources|aggregate evidence|cross-method confidence|consensus)"
+        r"\s+(?:for|on)\s+(.+?)\s+(?:via|using)\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s+(?:through|with|neighbor)\s+([A-Za-z][A-Za-z0-9_\-\s]*))?$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, edge_type, neighbor = m.groups()
+        values = [target.strip(), edge_type.strip()]
+        if neighbor:
+            values.append(neighbor.strip())
+        return "edge", values
+
+    m = re.match(
+        r"^aggregate\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:for|on)\s+(.+?)"
+        r"(?:\s+(?:through|with|neighbor)\s+([A-Za-z][A-Za-z0-9_\-\s]*))?$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        edge_type, target, neighbor = m.groups()
+        values = [target.strip(), edge_type.strip()]
+        if neighbor:
+            values.append(neighbor.strip())
+        return "edge", values
+
+    m = re.match(
+        r"^(?:is|are)\s+(.+?)\s+([A-Za-z][A-Za-z0-9_\-\s]*?)[-\s]?(?:regulated|associated|linked|connected)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        target, neighbor = m.groups()
+        return "schema-neighbor", [target.strip(), neighbor.strip()]
+    return None
 
 
 def _stage_request(text: str):
