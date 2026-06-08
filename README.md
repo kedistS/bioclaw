@@ -89,9 +89,10 @@ skills add deterministic truth-value math on top.
 Lookup replies are capped by `BIOKG_MAX_CONNECTIONS` (default `20`) so IRC and
 LLM contexts stay readable. The count in a lookup response means "returned in
 this lookup", not necessarily the entity's total number of KG edges. Displayed
-examples are chosen deterministically by code: recognizable biology terms such
-as DNA binding, chromatin binding, p53 binding, zinc ion binding, protein
-binding, and cancer/process terms are shown first, then shorter ontology names.
+examples are chosen deterministically by code: names are cleaned and deduplicated,
+very broad ontology labels are lightly deprioritized, and concise terms are shown
+before long labels. The selector is gene-agnostic; it does not special-case TP53,
+BRCA1, or any other gene.
 
 Three skills still in the backlog are exposed as safe Phase 2 limitation
 responses, not active reasoning implementations:

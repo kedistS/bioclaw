@@ -3005,9 +3005,9 @@ def _lookup_group(rel: str, target_label: str, outgoing: bool) -> str:
 def _readable_examples(values: list, limit: int) -> list:
     """Choose deterministic examples for compact display.
 
-    We do not ask an LLM to choose. The ranking first prefers recognizable
-    biology terms that are useful in demos, then falls back to shorter names
-    before longer ontology labels.
+    We do not ask an LLM to choose. Keep the ordering gene-agnostic: avoid
+    spotlighting demo-specific phrases, lightly deprioritize very broad
+    ontology labels, then prefer concise names before long labels.
     """
     values = _dedupe_preserve_order([_clean_display_name(v) for v in values if v])
     values.sort(key=_readability_rank)
@@ -3016,21 +3016,19 @@ def _readable_examples(values: list, limit: int) -> list:
 
 def _readability_rank(value: str):
     text = str(value).lower()
-    preferred = (
-        "dna binding",
-        "chromatin binding",
-        "p53 binding",
-        "zinc ion binding",
+    broad_terms = (
         "protein binding",
         "enzyme binding",
-        "apoptotic",
-        "cell cycle",
-        "breast cancer",
+        "dna binding",
+        "rna binding",
+        "nucleic acid binding",
+        "molecular function",
+        "biological process",
+        "cellular component",
     )
-    for idx, phrase in enumerate(preferred):
-        if phrase in text:
-            return (0, idx, len(text), text)
-    return (1, len(text), text)
+    broad = 1 if text in broad_terms else 0
+    vague_binding = 1 if text.endswith(" binding") and len(text.split()) <= 2 else 0
+    return (broad, vague_binding, len(text), text)
 
 
 def _clean_display_name(value: Any) -> str:
