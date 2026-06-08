@@ -83,6 +83,8 @@
     "  NEIGHBOR_LABEL, then runs the same source aggregate with that edge and"
     "  neighbor-label filter. Use this for natural relationship phrases when"
     "  the edge type is implied by the loaded schema."
+    "- Inspect schema mapping for a target entity and neighboring node label: biokg-schema-neighbor TARGET_NAME|NEIGHBOR_LABEL"
+    "  Returns the resolved node labels, schema edge, and accepted aliases."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -149,6 +151,9 @@
 
 (= (biokg-schema)
    (py-call (biokg.describe_schema)))
+
+(= (biokg-schema-neighbor $combined)
+   (py-call (biokg.schema_neighbor_pipe $combined)))
 
 (= (biokg-provenance $name)
    (py-call (biokg.provenance $name)))

@@ -452,6 +452,17 @@ def pln_schema_neighbor_aggregate_pipe(combined: str) -> str:
     return _get_backend().pln_schema_neighbor_aggregate(target, neighbor_label)
 
 
+def schema_neighbor_pipe(combined: str) -> str:
+    """Inspect schema mapping for TARGET_NAME|NEIGHBOR_LABEL without querying edges."""
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) != 2 or not all(parts):
+        return ("error: biokg-schema-neighbor format is TARGET_NAME|NEIGHBOR_LABEL.\n"
+                "Example: biokg-schema-neighbor TARGET_ENTITY|NEIGHBOR_LABEL")
+    target, neighbor_label = parts
+    return _get_backend().schema_neighbor(target, neighbor_label)
+
+
 # ─── BioCypher schema loader ────────────────────────────────────────────────
 # Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
 #   entities[label] = { name_prop, all_labels (incl. inherited) }
@@ -484,10 +495,14 @@ class Schema:
             elif represented == "edge":
                 # output_label wins over input_label for Neo4j relationship type.
                 rel = body.get("output_label") or body.get("input_label") or name
+                predicate = str(body.get("biolink_predicate") or "").strip()
+                predicate_local = predicate.split(":", 1)[-1] if predicate else ""
                 aliases = [
                     rel,
                     body.get("input_label"),
                     body.get("output_label"),
+                    predicate_local,
+                    _schema_token(predicate_local),
                     name,
                     _schema_token(name),
                 ]
@@ -633,6 +648,29 @@ def _schema_edge_aliases(schema: Optional[Schema], edge_label: str) -> set:
     if edge:
         aliases.update(str(a).strip() for a in edge.get("aliases", []) if str(a).strip())
     return aliases
+
+
+def _schema_neighbor_contract(schema: Optional[Schema], target_label: str,
+                              neighbor_label: str):
+    resolved_neighbor = _schema_label_for_phrase(schema, neighbor_label)
+    if not resolved_neighbor:
+        return None, [], set(), (
+            f"error: neighbor label {neighbor_label!r} is not in the loaded BioCypher schema."
+        )
+    edges = _schema_edges_between(schema, target_label, resolved_neighbor)
+    if not edges:
+        return resolved_neighbor, [], set(), (
+            f"error: schema has no edge connecting {target_label!r} and "
+            f"{resolved_neighbor!r}; specify the edge type explicitly."
+        )
+    if len(edges) > 1:
+        return resolved_neighbor, edges, set(), (
+            f"error: schema has multiple edges connecting {target_label!r} and "
+            f"{resolved_neighbor!r}: {', '.join(edges)}. Specify the edge type explicitly."
+        )
+    edge = edges[0]
+    aliases = _schema_edge_aliases(schema, edge)
+    return resolved_neighbor, edges, aliases, None
 
 
 class DataSources:
@@ -828,6 +866,9 @@ class DisabledBackend:
 
     def pln_schema_neighbor_aggregate(self, target_name: str, neighbor_label: str) -> str:
         return f"biokg unavailable ({self._reason}); cannot run schema-derived source aggregate"
+
+    def schema_neighbor(self, target_name: str, neighbor_label: str) -> str:
+        return f"biokg unavailable ({self._reason}); cannot inspect schema-neighbor mapping"
 
 
 class Neo4jBackend:
@@ -1523,17 +1564,29 @@ class Neo4jBackend:
         if not target_label:
             return (f"error: target entity {target_name!r} not found in BioKG "
                     f"(tried properties: {', '.join(self._name_props)}).")
-        resolved_neighbor = _schema_label_for_phrase(self._schema, neighbor_label)
-        if not resolved_neighbor:
-            return f"error: neighbor label {neighbor_label!r} is not in the loaded BioCypher schema."
-        edges = _schema_edges_between(self._schema, target_label, resolved_neighbor)
-        if not edges:
-            return (f"error: schema has no edge connecting {target_label!r} and "
-                    f"{resolved_neighbor!r}; specify the edge type explicitly.")
-        if len(edges) > 1:
-            return (f"error: schema has multiple edges connecting {target_label!r} and "
-                    f"{resolved_neighbor!r}: {', '.join(edges)}. Specify the edge type explicitly.")
+        resolved_neighbor, edges, _aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
         return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
+
+    def schema_neighbor(self, target_name: str, neighbor_label: str) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_label = self._resolve_label(target_name)
+        if not target_label:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        resolved_neighbor, edges, aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        return (
+            f"Schema maps {target_label} + {resolved_neighbor} to edge {edges[0]}. "
+            f"Accepted schema aliases: {', '.join(sorted(aliases))}."
+        )
 
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all edges of EDGE_TYPE incident to TARGET.
@@ -1549,6 +1602,7 @@ class Neo4jBackend:
         safe_edge_type = "".join(c for c in str(edge_type).strip() if c.isalnum() or c == "_")
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r}"
+        edge_aliases = _schema_edge_aliases(self._schema, safe_edge_type)
         safe_neighbor_label = None
         if neighbor_label:
             safe_neighbor_label = "".join(
@@ -1583,8 +1637,10 @@ class Neo4jBackend:
 
         if not rows:
             scope = f" through {safe_neighbor_label} nodes" if safe_neighbor_label else ""
+            aliases = f" Expected schema aliases: {', '.join(sorted(edge_aliases))}." if edge_aliases else ""
             return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}{scope}. "
-                    f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking.")
+                    f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking."
+                    f"{aliases}")
 
         t_label = rows[0]["t_label"]
         t_name = rows[0]["t_name"]
@@ -2877,17 +2933,30 @@ class MorkBackend:
             return (f"error: target entity {target_name!r} not found in BioKG "
                     f"(tried properties: {', '.join(self._name_props)}).")
         target_label, _target_id = target_entity
-        resolved_neighbor = _schema_label_for_phrase(self._schema, neighbor_label)
-        if not resolved_neighbor:
-            return f"error: neighbor label {neighbor_label!r} is not in the loaded BioCypher schema."
-        edges = _schema_edges_between(self._schema, target_label, resolved_neighbor)
-        if not edges:
-            return (f"error: schema has no edge connecting {target_label!r} and "
-                    f"{resolved_neighbor!r}; specify the edge type explicitly.")
-        if len(edges) > 1:
-            return (f"error: schema has multiple edges connecting {target_label!r} and "
-                    f"{resolved_neighbor!r}: {', '.join(edges)}. Specify the edge type explicitly.")
+        resolved_neighbor, edges, _aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
         return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
+
+    def schema_neighbor(self, target_name: str, neighbor_label: str) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_entity = self._resolve_name(target_name)
+        if not target_entity:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        target_label, _target_id = target_entity
+        resolved_neighbor, edges, aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        return (
+            f"Schema maps {target_label} + {resolved_neighbor} to edge {edges[0]}. "
+            f"Accepted schema aliases: {', '.join(sorted(aliases))}."
+        )
 
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all EDGE_TYPE edges incident to TARGET.
@@ -3052,8 +3121,10 @@ class MorkBackend:
 
         if not per_source:
             scope = f" through {safe_neighbor_label} nodes" if safe_neighbor_label else ""
+            aliases = f" Expected schema aliases: {', '.join(sorted(edge_aliases))}." if edge_aliases else ""
             return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}{scope}. "
-                    f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking.")
+                    f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking."
+                    f"{aliases}")
 
         # Per-source summary segments + stvs for the cross-source merge.
         src_segs = []

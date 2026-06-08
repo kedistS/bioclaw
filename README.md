@@ -130,6 +130,8 @@ sources are not mixed into enhancer evidence. The reasoning primitive itself is
 not enhancer-specific: explicit requests can aggregate any schema edge type with
 multiple sources, and natural relationship phrases can use
 `TARGET|NEIGHBOR_LABEL` schema-derived routing to find the connecting edge.
+`biokg-schema-neighbor TARGET|NEIGHBOR_LABEL` reports the exact schema edge and
+aliases used, so KG/schema mismatches stay visible instead of being guessed over.
 
 The TOKEN FIDELITY rule in both the Conductor and Reasoner prompts ensures
 `stv(f, c)` values are copied byte-for-byte through the relay chain. They're
