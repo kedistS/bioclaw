@@ -283,7 +283,7 @@ def lookup(name: str) -> str:
         and not result.startswith(("error:", "biokg unavailable", "biokg neo4j error"))
         and "no connections in BioKG" not in result
         and "No entity matching" not in result
-        and ("BioKG direct annotations:" in result or "|" in result or "->" in result or "<-" in result)
+        and ("BioKG returned" in result or "BioKG direct annotations:" in result or "|" in result or "->" in result or "<-" in result)
     )
     if cacheable:
         with _cache_lock:
@@ -308,7 +308,7 @@ def stage_pipe(combined: str, agent: str = "specialist") -> str:
     parts = [p.strip() for p in s.split("|")]
     if len(parts) < 3:
         return ("error: biokg-stage format is SOURCE|EDGE_TYPE|TARGET[|EVIDENCE].\n"
-                "Example: biokg-stage TP53|enables|nucleic acid binding|inferred from KG lookup")
+                "Example: biokg-stage SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY|brief evidence")
     source, edge_type, target = parts[0], parts[1], parts[2]
     evidence = parts[3] if len(parts) > 3 else ""
     return _get_backend().stage_edge(source, edge_type, target, evidence, agent=str(agent))
@@ -407,7 +407,7 @@ def pln_evidence_merge_pipe(combined: str) -> str:
     parts = [p.strip() for p in s.split("|")]
     if len(parts) != 3:
         return ("error: biokg-pln-evidence-merge format is SOURCE|EDGE_TYPE|TARGET.\n"
-                "Example: biokg-pln-evidence-merge TP53|enables|nucleic acid binding")
+                "Example: biokg-pln-evidence-merge SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY")
     source, edge_type, target = parts[0], parts[1], parts[2]
     return _get_backend().pln_evidence_merge(source, edge_type, target)
 
@@ -428,7 +428,7 @@ def pln_source_aggregate_pipe(combined: str) -> str:
     parts = [p.strip() for p in s.split("|")]
     if len(parts) != 2:
         return ("error: biokg-pln-source-aggregate format is TARGET_NAME|EDGE_TYPE.\n"
-                "Example: biokg-pln-source-aggregate BRCA1|associated_with")
+                "Example: biokg-pln-source-aggregate TARGET_ENTITY|EDGE_TYPE")
     target, edge_type = parts[0], parts[1]
     return _get_backend().pln_source_aggregate(target, edge_type)
 
@@ -2018,10 +2018,10 @@ class MorkBackend:
     def _legacy_lookup_edges(self, label: str, eid: str, max_conn: int) -> list:
         """Fallback for MORK stores where the name-property join is too strict.
 
-        Older demo images used this simpler direct-edge projection and then
+        Older MORK images used this simpler direct-edge projection and then
         resolved neighbor IDs one by one. It is less elegant than the joined
-        path, but it is reliable for BioKG demo questions like "what does TP53
-        do?" where GO-term IDs can be resolved through term_name atoms.
+        path, but it is reliable for direct entity lookups where neighbor IDs
+        can be resolved through name-property atoms.
         """
         import uuid
         tag_suffix = uuid.uuid4().hex[:12]
@@ -3006,7 +3006,7 @@ def _readable_examples(values: list, limit: int) -> list:
     """Choose deterministic examples for compact display.
 
     We do not ask an LLM to choose. Keep the ordering gene-agnostic: avoid
-    spotlighting demo-specific phrases, lightly deprioritize very broad
+    spotlighting entity-specific phrases, lightly deprioritize very broad
     ontology labels, then prefer concise names before long labels.
     """
     values = _dedupe_preserve_order([_clean_display_name(v) for v in values if v])

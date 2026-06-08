@@ -76,7 +76,7 @@ def normalize_string(x):
 #   - {}, [], (), or other empty fragments
 #
 # Without preprocessing, these get treated as skill calls to fictional skills
-# (e.g. `TP53` or `[TOOL_CALL]`), producing garbage COMMAND_RETURNs that
+# (e.g. an entity symbol or `[TOOL_CALL]`), producing garbage COMMAND_RETURNs that
 # pollute the agent's history and trigger ERROR_FEEDBACK loops.
 #
 # Strategy:
@@ -437,8 +437,8 @@ def test_balance_parenthesis():
 
     # sanitizer cases
     # 1. orphan prose gets wrapped as send
-    assert balance_parentheses('TP53 is a gene with broad capabilities') == \
-        '((send "TP53 is a gene with broad capabilities"))'
+    assert balance_parentheses('GENE_SYMBOL is a gene with broad capabilities') == \
+        '((send "GENE_SYMBOL is a gene with broad capabilities"))'
     # 2. [TOOL_CALL] wrappers are stripped (inner content still parsed)
     assert balance_parentheses('[TOOL_CALL]\nsend hello\n[/TOOL_CALL]') == '((send "hello"))'
     # 3. <tool_call> wrappers are stripped
@@ -454,18 +454,18 @@ def test_balance_parenthesis():
     out = balance_parentheses('send Working on it\nResponse arrived')
     assert out == '((send "Working on it"))', f"got: {out}"
     # 7. biokg-* skill is recognized (forward-compat)
-    assert balance_parentheses('biokg-lookup TP53') == '((biokg-lookup "TP53"))'
+    assert balance_parentheses('biokg-lookup GENE_SYMBOL') == '((biokg-lookup "GENE_SYMBOL"))'
     # 8. ask-agent stays intact
-    assert balance_parentheses('ask-agent assistant|What does TP53 do?') == \
-        '((ask-agent "assistant|What does TP53 do?"))'
+    assert balance_parentheses('ask-agent assistant|What does GENE_SYMBOL do?') == \
+        '((ask-agent "assistant|What does GENE_SYMBOL do?"))'
 
     # 9. Multiple sends in one turn: keep first, drop the rest
     multi_send = balance_parentheses('send First answer\nsend Second answer\nsend Third answer')
     assert multi_send == '((send "First answer"))', f"got: {multi_send}"
 
     # 10. send + ask-agent in same turn: both pass (different skill names)
-    pair = balance_parentheses('send Working on it\nask-agent assistant|What does TP53 do?')
-    assert pair == '((send "Working on it") (ask-agent "assistant|What does TP53 do?"))', f"got: {pair}"
+    pair = balance_parentheses('send Working on it\nask-agent assistant|What does GENE_SYMBOL do?')
+    assert pair == '((send "Working on it") (ask-agent "assistant|What does GENE_SYMBOL do?"))', f"got: {pair}"
 
     # 11. Spam pattern: echoed system warning gets dropped
     spam = balance_parentheses('send DO NOT RE-SEND OR SPAM!')
@@ -492,7 +492,7 @@ def test_balance_parenthesis():
     assert forthis == '()', f"got: {forthis}"
 
     # 17. "no output - waiting for ..." status comments get dropped
-    noop = balance_parentheses('send no output - waiting for assistant reply on prior TP53 query')
+    noop = balance_parentheses('send no output - waiting for assistant reply on prior entity query')
     assert noop == '()', f"got: {noop}"
 
     # 18. "(no output - ..." parenthesized comments get dropped
@@ -509,11 +509,11 @@ def test_balance_parenthesis():
 
     # 21. Staged-edge replies intentionally need a second approval instruction.
     staged = balance_parentheses(
-        'send [STAGED edge a1b2c3d4] (gene:TP53) -[enables]-> (molecular_function:DNA binding)\n'
+        'send [STAGED edge a1b2c3d4] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> (target_label:TARGET_ENTITY)\n'
         'send To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4.'
     )
     assert staged == (
-        '((send "[STAGED edge a1b2c3d4] (gene:TP53) -[enables]-> (molecular_function:DNA binding)") '
+        '((send "[STAGED edge a1b2c3d4] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> (target_label:TARGET_ENTITY)") '
         '(send "To approve, reply: approve a1b2c3d4. To reject, reply: reject a1b2c3d4."))'
     ), f"got: {staged}"
 

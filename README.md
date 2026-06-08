@@ -71,17 +71,17 @@ docker compose logs -f
 
 ## Working capabilities
 
-Every demo question grounds in a Cypher call against the BioAtomSpace. PLN
+Every supported question grounds in a BioKG query against the configured backend. PLN
 skills add deterministic truth-value math on top.
 
 | Question pattern | Specialist | Skill |
 |---|---|---|
 | `hi`, `what can you do?` | Conductor only | (direct send) |
-| `what does TP53 do?` | AssistantOC | `biokg-lookup` |
-| `what protein does IMPACT translate to?` | AssistantOC | `biokg-lookup` (multi-hop traversal) |
-| `who said BRCA1 enables zinc ion binding?` | AssistantOC | `biokg-provenance` |
-| `reconcile BRCA1 enables zinc ion binding` | ReasonerOC | `biokg-pln-evidence-merge` |
-| `is BRCA1 enhancer-regulated?` | ReasonerOC | `biokg-pln-source-aggregate` |
+| `what does GENE_SYMBOL do?` | AssistantOC | `biokg-lookup` |
+| `what protein does GENE_SYMBOL translate to?` | AssistantOC | `biokg-lookup` (multi-hop traversal) |
+| `who said SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY?` | AssistantOC | `biokg-provenance` |
+| `reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY` | ReasonerOC | `biokg-pln-evidence-merge` |
+| `is GENE_SYMBOL enhancer-regulated?` | ReasonerOC | `biokg-pln-source-aggregate` |
 | `propose adding edge: X enables Y` | AssistantOC | `biokg-stage` |
 | `show staging` | Conductor only | `biokg-list-staging` |
 | `approve <hex>` / `reject <hex>` | Conductor only | `biokg-promote` / `biokg-reject` |
@@ -91,8 +91,8 @@ LLM contexts stay readable. The count in a lookup response means "returned in
 this lookup", not necessarily the entity's total number of KG edges. Displayed
 examples are chosen deterministically by code: names are cleaned and deduplicated,
 very broad ontology labels are lightly deprioritized, and concise terms are shown
-before long labels. The selector is gene-agnostic; it does not special-case TP53,
-BRCA1, or any other gene.
+before long labels. The selector is gene-agnostic; it does not special-case any
+gene or disease.
 
 Three skills still in the backlog are exposed as safe Phase 2 limitation
 responses, not active reasoning implementations:
@@ -132,10 +132,10 @@ Specialists never write directly to canonical BioKG. Every new edge goes
 through the approval gate:
 
 ```
-biocurator:  propose adding edge: TP53 enables protein heterodimerization activity
+biocurator:  propose adding edge: SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY
 Conductor:   Working on it; routing the proposal...
              (→ AssistantOC runs biokg-stage → returns [STAGED edge b534b898])
-Conductor:   [STAGED edge b534b898] (gene:TP53) -[enables]-> (molecular_function:protein heterodimerization activity)
+Conductor:   [STAGED edge b534b898] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> (target_label:TARGET_ENTITY)
              To approve, reply: approve b534b898. To reject, reply: reject b534b898.
 
 biocurator:  approve b534b898
@@ -166,8 +166,8 @@ Lineage is queryable forever.
 MATCH (s)-[r]->(t) WHERE r._status = 'pending'
 RETURN s, r, t LIMIT 25;
 
-// Promoted-via-stage edges for a gene
-MATCH (g:gene {gene_name:'TP53'})-[r]->(m)
+// Promoted-via-stage edges for a named gene
+MATCH (g:gene {gene_name:'GENE_SYMBOL'})-[r]->(m)
 WHERE r._staged_by IS NOT NULL AND r._status = 'promoted'
 RETURN g.gene_name, type(r), r._staged_by, r._evidence, m;
 ```
@@ -178,7 +178,7 @@ RETURN g.gene_name, type(r), r._staged_by, r._evidence, m;
 # Stage from inside the conductor (skips the LLM)
 docker exec bioclaw-conductor python3 -c \
   "import sys; sys.path.insert(0,'/PeTTa/repos/OmegaClaw-Core/src'); \
-   import biokg; print(biokg.stage_pipe('TP53|enables|protein heterodimerization activity|test'))"
+   import biokg; print(biokg.stage_pipe('SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY|test'))"
 
 # List pending
 docker exec bioclaw-conductor python3 -c \
@@ -316,7 +316,7 @@ docker compose ps                     # who's up
 docker compose logs -f conductor      # one agent's logs
 docker compose restart assistant-oc   # bounce one agent
 docker compose down                   # stop, keep memory
-docker compose down -v                # stop + wipe memory (fresh demo state)
+docker compose down -v                # stop + wipe memory for a fresh state
 docker compose build --no-cache       # force rebuild
 ```
 

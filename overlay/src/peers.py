@@ -52,14 +52,14 @@ def _reasoner_fast_path(query: str):
     q_norm = re.sub(r"\s+", " ", q).strip()
     q_lower = q_norm.lower().rstrip("?.!")
 
-    # "is BRCA1 enhancer-regulated?" -> BRCA1|associated_with
+    # "is GENE_SYMBOL enhancer-regulated?" -> GENE_SYMBOL|associated_with
     m = re.match(r"^(?:is|are)\s+(.+?)\s+enhancer[-\s]?regulated$", q_lower)
     if m:
         target = q_norm.split()[1]
         import biokg
         return biokg.pln_source_aggregate_pipe(f"{target}|associated_with")
 
-    # "reconcile BRCA1 enables zinc ion binding" -> BRCA1|enables|zinc ion binding
+    # "reconcile SOURCE EDGE_TYPE TARGET" -> SOURCE|EDGE_TYPE|TARGET
     for prefix in ("reconcile ", "merge evidence for "):
         if q_lower.startswith(prefix):
             body = q_norm[len(prefix):].strip()
@@ -183,7 +183,7 @@ def _flatten_for_relay(text: str) -> str:
 def ask_pipe(combined):
     """Single-arg form for LLMs that struggle to emit two quoted args.
 
-    Format: ROLE|QUERY  e.g.  annotation|Annotate gene TP53 with function tumor suppressor
+    Format: ROLE|QUERY  e.g.  assistant|What does GENE_SYMBOL do?
     Falls back to colon and whitespace separators. Strips leading/trailing
     quotes from the query (LLMs often wrap the whole arg in quotes).
     """
@@ -199,7 +199,7 @@ def ask_pipe(combined):
             role, query = parts
         else:
             return ("error: could not parse ask-agent argument. Use one of these forms:\n"
-                    "  ask-agent annotation|Annotate TP53 with tumor suppressor\n"
-                    "  ask-agent annotation \"Annotate TP53 with tumor suppressor\"")
+                    "  ask-agent assistant|What does GENE_SYMBOL do?\n"
+                    "  ask-agent reasoner|Reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY")
 
     return ask(role.strip(), query.strip().strip('"').strip("'").strip())

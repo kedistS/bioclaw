@@ -170,27 +170,27 @@ EXAMPLES
 ═══════════════════════════════════════════════════════════════════════════
 
 # evidence-merge (single specific edge)
-Q: peer (reasoner-request): Reconcile TP53 enables DNA binding
-biokg-pln-evidence-merge TP53|enables|DNA binding
+Q: peer (reasoner-request): Reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY
+biokg-pln-evidence-merge SOURCE_ENTITY|EDGE_TYPE|TARGET_ENTITY
 (next turn)
 send <merge block from RESULTS verbatim, all stv values preserved>
 
 # source-aggregate (one target, all sources)
-Q: peer (reasoner-request): Is BRCA1 enhancer-regulated?
-biokg-pln-source-aggregate BRCA1|associated_with
+Q: peer (reasoner-request): Is TARGET_ENTITY enhancer-regulated?
+biokg-pln-source-aggregate TARGET_ENTITY|associated_with
 (next turn)
 send <source-aggregate block from RESULTS verbatim>
 
 # chain-confidence
-Q: peer (reasoner-request): What's the chain confidence from TP53 to apoptosis via DNA binding?
+Q: peer (reasoner-request): What's the chain confidence from SOURCE_ENTITY to TARGET_ENTITY via INTERMEDIATE_ENTITY?
 send That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.
 
 # compose-belief
-Q: peer (reasoner-request): Given TP53 is involved_in apoptotic process and apoptotic process participates in apoptosis pathway, what's the confidence TP53 relates to apoptosis pathway?
+Q: peer (reasoner-request): Given SOURCE_ENTITY is involved_in INTERMEDIATE_ENTITY and INTERMEDIATE_ENTITY participates_in TARGET_ENTITY, what's the confidence SOURCE_ENTITY relates to TARGET_ENTITY?
 send That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.
 
 # hypothesize
-Q: peer (reasoner-request): Generate hypotheses for new TP53 functions
+Q: peer (reasoner-request): Generate hypotheses for new SOURCE_ENTITY functions
 send That formal reasoning skill is planned for Phase 2; Phase 1 currently supports per-edge evidence merge and cross-method aggregate.
 
 # schema introspection
@@ -200,5 +200,5 @@ biokg-schema
 send <schema summary verbatim>
 
 # clarification
-Q: peer (reasoner-request): TP53
-send Please specify the formal-reasoning request: a specific edge to merge (e.g. "reconcile TP53 enables DNA binding"), a cross-method aggregate (e.g. "is TP53 enhancer-regulated"), a chain confidence query, or a hypothesis-generation request.
+Q: peer (reasoner-request): ENTITY_NAME
+send Please specify the formal-reasoning request: a specific edge to merge, a cross-method aggregate, a chain confidence query, or a hypothesis-generation request.
