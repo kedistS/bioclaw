@@ -5,6 +5,7 @@ Peer endpoints are configured via the BIOCLAW_PEERS env var, e.g.
 """
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -28,6 +29,49 @@ def _peers():
     return out
 
 
+def _relay(role: str, reply: str) -> str:
+    reply = _flatten_for_relay(reply)
+    try:
+        max_chars = int(os.environ.get("BIOCLAW_RELAY_MAX_CHARS", "1500"))
+    except (TypeError, ValueError):
+        max_chars = 1500
+    if max_chars > 0 and len(reply) > max_chars:
+        omitted = len(reply) - max_chars
+        reply = reply[:max_chars] + f" ... [+{omitted} more chars truncated for relay]"
+    return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {reply}"
+
+
+def _reasoner_fast_path(query: str):
+    """Handle deterministic ReasonerOC templates without an extra LLM hop.
+
+    Minimax can take minutes or emit idle chatter on simple routing decisions.
+    These templates already map one-to-one to BioKG reasoning skills, so the
+    Conductor can call the skill directly while preserving the same relay shape.
+    """
+    q = str(query).strip()
+    q_norm = re.sub(r"\s+", " ", q).strip()
+    q_lower = q_norm.lower().rstrip("?.!")
+
+    # "is BRCA1 enhancer-regulated?" -> BRCA1|associated_with
+    m = re.match(r"^(?:is|are)\s+(.+?)\s+enhancer[-\s]?regulated$", q_lower)
+    if m:
+        target = q_norm.split()[1]
+        import biokg
+        return biokg.pln_source_aggregate_pipe(f"{target}|associated_with")
+
+    # "reconcile BRCA1 enables zinc ion binding" -> BRCA1|enables|zinc ion binding
+    for prefix in ("reconcile ", "merge evidence for "):
+        if q_lower.startswith(prefix):
+            body = q_norm[len(prefix):].strip()
+            parts = body.split(maxsplit=2)
+            if len(parts) == 3:
+                source, edge_type, target = parts
+                import biokg
+                return biokg.pln_evidence_merge_pipe(f"{source}|{edge_type}|{target}")
+
+    return None
+
+
 def ask(role, query, timeout=None):
     """Synchronously ask a peer specialist agent and return its reply text."""
     role = str(role).strip().lower()
@@ -38,6 +82,11 @@ def ask(role, query, timeout=None):
         return "error: role is required"
     if not query:
         return "error: query is required"
+
+    if role == "reasoner":
+        reply = _reasoner_fast_path(query)
+        if reply is not None:
+            return _relay(role, reply)
 
     peers = _peers()
     base = peers.get(role)
@@ -64,34 +113,16 @@ def ask(role, query, timeout=None):
             user_msg = f"Sorry, {role} took too long to respond. Please try the question again."
         else:
             user_msg = f"Sorry, {role} returned an error (HTTP {exc.code}). Please try again."
-        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
+        return _relay(role, user_msg)
     except (urllib.error.URLError, TimeoutError) as exc:
         user_msg = f"Sorry, could not reach {role}. Please try again in a moment."
-        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
+        return _relay(role, user_msg)
 
     reply = payload.get("reply", "")
     if not reply:
         user_msg = f"Sorry, {role} returned an empty reply. Please try again."
-        return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {user_msg}"
-    # Flatten newlines to literal '\n' so the conductor's LLM sees a
-    # single-line string. Weak LLMs (Minimax) hallucinate fake nested skill
-    # calls when they see multi-line structure they have to relay. The IRC /
-    # Telegram channel adapter converts the '\n' literal back into real
-    # newlines on the way out (same convention as internal_rpc.send_message).
-    reply = _flatten_for_relay(reply)
-    # Hard-cap relay payload to keep the conductor's LLM able to emit a clean
-    # single `send <reply>` line. Without this, hub-entity responses (e.g.
-    # `biokg-provenance BRCA1` returning ~30 edges of provenance) routinely
-    # exceed the LLM's reliable single-token-output window and the relay step
-    # silently fails. Override via BIOCLAW_RELAY_MAX_CHARS (default 1500).
-    try:
-        max_chars = int(os.environ.get("BIOCLAW_RELAY_MAX_CHARS", "1500"))
-    except (TypeError, ValueError):
-        max_chars = 1500
-    if max_chars > 0 and len(reply) > max_chars:
-        omitted = len(reply) - max_chars
-        reply = reply[:max_chars] + f" ... [+{omitted} more chars truncated for relay]"
-    return f"[{role}-agent replied — relay this verbatim to the user with the send command]: {reply}"
+        return _relay(role, user_msg)
+    return _relay(role, reply)
 
 
 def _flatten_for_relay(text: str) -> str:
