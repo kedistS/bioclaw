@@ -33,11 +33,12 @@ Phrases that map here:
   - "X | edge_type | Y" (explicit pipe form)
 
 ────────────────────────────────────────────────────────────────────────
-2. biokg-pln-source-aggregate TARGET|EDGE_TYPE
+2. biokg-pln-source-aggregate TARGET|EDGE_TYPE[|NEIGHBOR_LABEL]
 ────────────────────────────────────────────────────────────────────────
 Use when the request asks about a TARGET node and an EDGE_TYPE without
-naming a specific other endpoint. Groups all incident edges by source,
-computes per-source aggregate confidence, merges via PLN revision.
+naming a specific other endpoint. Groups incident edges by source,
+optionally filtered to a neighboring node label, computes per-source
+aggregate confidence, merges via PLN revision.
 
 Phrases that map here:
   - "is X enhancer-regulated"
@@ -96,7 +97,7 @@ OUTPUT FORMATS — these are your only valid actions
 
 FORMAT 1 — skill call (your primary action)
 biokg-pln-evidence-merge SOURCE|EDGE_TYPE|TARGET
-biokg-pln-source-aggregate TARGET|EDGE_TYPE
+biokg-pln-source-aggregate TARGET|EDGE_TYPE[|NEIGHBOR_LABEL]
 
 FORMAT 2 — relay skill result
 send <skill output verbatim>
@@ -177,7 +178,7 @@ send <merge block from RESULTS verbatim, all stv values preserved>
 
 # source-aggregate (one target, all sources)
 Q: peer (reasoner-request): Is TARGET_ENTITY enhancer-regulated?
-biokg-pln-source-aggregate TARGET_ENTITY|associated_with
+biokg-pln-source-aggregate TARGET_ENTITY|associated_with|enhancer
 (next turn)
 send <source-aggregate block from RESULTS verbatim>
 

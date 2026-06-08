@@ -52,12 +52,12 @@ def _reasoner_fast_path(query: str):
     q_norm = re.sub(r"\s+", " ", q).strip()
     q_lower = q_norm.lower().rstrip("?.!")
 
-    # "is GENE_SYMBOL enhancer-regulated?" -> GENE_SYMBOL|associated_with
+    # "is GENE_SYMBOL enhancer-regulated?" -> GENE_SYMBOL|associated_with|enhancer
     m = re.match(r"^(?:is|are)\s+(.+?)\s+enhancer[-\s]?regulated$", q_lower)
     if m:
         target = q_norm.split()[1]
         import biokg
-        return biokg.pln_source_aggregate_pipe(f"{target}|associated_with")
+        return biokg.pln_source_aggregate_pipe(f"{target}|associated_with|enhancer")
 
     # "reconcile SOURCE EDGE_TYPE TARGET" -> SOURCE|EDGE_TYPE|TARGET
     for prefix in ("reconcile ", "merge evidence for "):

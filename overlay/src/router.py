@@ -55,7 +55,7 @@ def route_human_message(msg: str) -> str:
     target = _enhancer_target(text)
     if target:
         import biokg
-        return _send(biokg.pln_source_aggregate_pipe(f"{target}|associated_with"))
+        return _send(biokg.pln_source_aggregate_pipe(f"{target}|associated_with|enhancer"))
 
     staged = _stage_request(text)
     if staged:

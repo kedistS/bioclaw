@@ -413,11 +413,12 @@ def pln_evidence_merge_pipe(combined: str) -> str:
 
 
 def pln_source_aggregate_pipe(combined: str) -> str:
-    """Single-arg form. Format: TARGET_NAME|EDGE_TYPE
+    """Single-arg form. Format: TARGET_NAME|EDGE_TYPE[|NEIGHBOR_LABEL]
 
     Cross-method consensus: for every edge of EDGE_TYPE incident to TARGET
-    (incoming OR outgoing), groups edges by `source`, computes per-source
-    mean confidence, then PLN-merges those per-source means.
+    (incoming OR outgoing), optionally restricted to a neighboring node label,
+    groups edges by `source`, computes per-source mean confidence, then
+    PLN-merges those per-source means.
 
     Answers questions like "is GENE enhancer-regulated, integrating
     PEREGRINE + Enhancer Atlas?" — where different methods catch different
@@ -426,11 +427,12 @@ def pln_source_aggregate_pipe(combined: str) -> str:
     """
     s = str(combined).strip().strip('"').strip("'").strip()
     parts = [p.strip() for p in s.split("|")]
-    if len(parts) != 2:
-        return ("error: biokg-pln-source-aggregate format is TARGET_NAME|EDGE_TYPE.\n"
-                "Example: biokg-pln-source-aggregate TARGET_ENTITY|EDGE_TYPE")
+    if len(parts) not in (2, 3):
+        return ("error: biokg-pln-source-aggregate format is TARGET_NAME|EDGE_TYPE[|NEIGHBOR_LABEL].\n"
+                "Example: biokg-pln-source-aggregate TARGET_ENTITY|EDGE_TYPE|NEIGHBOR_LABEL")
     target, edge_type = parts[0], parts[1]
-    return _get_backend().pln_source_aggregate(target, edge_type)
+    neighbor_label = parts[2] if len(parts) == 3 else None
+    return _get_backend().pln_source_aggregate(target, edge_type, neighbor_label)
 
 
 # ─── BioCypher schema loader ────────────────────────────────────────────────
@@ -750,7 +752,7 @@ class DisabledBackend:
     def pln_evidence_merge(self, source_name: str, edge_type: str, target_name: str) -> str:
         return f"biokg unavailable ({self._reason}); cannot run PLN evidence merge"
 
-    def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
+    def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         return f"biokg unavailable ({self._reason}); cannot run PLN source aggregate"
 
 
@@ -1430,7 +1432,7 @@ class Neo4jBackend:
             f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
         )
 
-    def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
+    def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all edges of EDGE_TYPE incident to TARGET.
 
         Use when:
@@ -1444,6 +1446,11 @@ class Neo4jBackend:
         safe_edge_type = "".join(c for c in str(edge_type).strip() if c.isalnum() or c == "_")
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r}"
+        safe_neighbor_label = None
+        if neighbor_label:
+            safe_neighbor_label = "".join(
+                c for c in str(neighbor_label).strip() if c.isalnum() or c == "_"
+            ) or None
 
         tgt_clauses = " OR ".join(f"toLower(t.{p}) = toLower($tgt)" for p in self._name_props)
         coalesce_t = "coalesce(" + ", ".join(f"t.{p}" for p in self._name_props) + ")"
@@ -1454,6 +1461,7 @@ class Neo4jBackend:
         cypher = (
             f"MATCH (t) WHERE {tgt_clauses} WITH t LIMIT 1 "
             f"MATCH (s)-[r:`{safe_edge_type}`]-(t) "
+            "WHERE $neighbor_label IS NULL OR $neighbor_label IN labels(s) "
             f"RETURN labels(t)[0]            AS t_label, {coalesce_t} AS t_name, "
             "       r.source              AS source, "
             "       r.confidence          AS edge_confidence, "
@@ -1462,12 +1470,17 @@ class Neo4jBackend:
         )
         try:
             with self._driver.session(database=self._database) as session:
-                rows = list(session.run(cypher, tgt=str(target_name).strip()))
+                rows = list(session.run(
+                    cypher,
+                    tgt=str(target_name).strip(),
+                    neighbor_label=safe_neighbor_label,
+                ))
         except Exception as exc:
             return f"biokg neo4j error: {exc}"
 
         if not rows:
-            return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}. "
+            scope = f" through {safe_neighbor_label} nodes" if safe_neighbor_label else ""
+            return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}{scope}. "
                     f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking.")
 
         t_label = rows[0]["t_label"]
@@ -2753,7 +2766,7 @@ class MorkBackend:
         return (f"BioKG found {len(sources_info)} evidence sources for {edge_phrase}: {sources_str}. "
                 f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}.")
 
-    def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
+    def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all EDGE_TYPE edges incident to TARGET.
 
         For each direction (target as source-of-edge, target as target-of-edge):
@@ -2767,6 +2780,11 @@ class MorkBackend:
         )
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r}"
+        safe_neighbor_label = None
+        if neighbor_label:
+            safe_neighbor_label = "".join(
+                c for c in str(neighbor_label).strip() if c.isalnum() or c == "_"
+            ) or None
 
         tgt_entity = self._resolve_name(target_name)
         if not tgt_entity:
@@ -2813,6 +2831,8 @@ class MorkBackend:
                 if len(parts) < 3:
                     continue
                 o_label, o_id = parts[0], parts[1]
+                if safe_neighbor_label and o_label != safe_neighbor_label:
+                    continue
                 src = " ".join(parts[2:])
                 key = (o_label, o_id, src)
                 if key in seen:
@@ -2824,7 +2844,8 @@ class MorkBackend:
                 per_source.setdefault(src, []).append(c)
 
         if not per_source:
-            return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}. "
+            scope = f" through {safe_neighbor_label} nodes" if safe_neighbor_label else ""
+            return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}{scope}. "
                     f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking.")
 
         # Per-source summary segments + stvs for the cross-source merge.

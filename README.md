@@ -113,14 +113,20 @@ For a single edge between two specific nodes:
 3. PLN's `Truth_Revision` rule combines the per-edge stvs into one merged stv.
 4. Output is a single line, deterministic, reproducible, byte-exact.
 
-`biokg-pln-source-aggregate TARGET|EDGE_TYPE`
+`biokg-pln-source-aggregate TARGET|EDGE_TYPE[|NEIGHBOR_LABEL]`
 
 For cross-method consensus around a target node:
 1. Cypher pulls every edge of `EDGE_TYPE` incident to `TARGET`.
-2. Groups edges by `r.source` (e.g. PEREGRINE, Enhancer Atlas).
-3. Computes per-source mean confidence.
-4. PLN-revises the per-source means into one cross-method consensus stv.
-5. Reports per-source `n`, `mean`, `max` so the biocurator can sanity-check.
+2. If `NEIGHBOR_LABEL` is supplied, keeps only edges whose other endpoint has
+   that node label.
+3. Groups edges by `r.source` (e.g. PEREGRINE, Enhancer Atlas).
+4. Computes per-source mean confidence.
+5. PLN-revises the per-source means into one cross-method consensus stv.
+6. Reports per-source `n`, `mean`, `max` so the biocurator can sanity-check.
+
+Enhancer-regulation questions use the filtered form
+`GENE_SYMBOL|associated_with|enhancer` so non-regulatory `associated_with`
+sources are not mixed into enhancer evidence.
 
 The TOKEN FIDELITY rule in both the Conductor and Reasoner prompts ensures
 `stv(f, c)` values are copied byte-for-byte through the relay chain. They're
