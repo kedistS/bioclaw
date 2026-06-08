@@ -1402,12 +1402,14 @@ class Neo4jBackend:
         # (or run on a stronger LLM), keep skill outputs to one line.
         head = f"PLN merge | {s_label}:{s_name} -{safe_edge_type}-> {t_label}:{t_name}"
 
+        edge_phrase = _format_edge_phrase(s_label, s_name, safe_edge_type, t_label, t_name)
+
         if len(sources) == 1:
             label, code, fc, citation = sources[0]
             cite = f" [{citation}]" if citation else ""
             return (
-                f"{head} | single source: {label} {_fmt_stv(fc)}{cite} "
-                f"| no merging — one source only"
+                f"BioKG has one evidence source for {edge_phrase}: {label} with {_fmt_stv(fc)}{cite}. "
+                f"Because there is only one source, PLN did not perform a merge."
             )
 
         source_segs = []
@@ -1418,15 +1420,14 @@ class Neo4jBackend:
 
         merged = _run_pln_merge([s[2] for s in sources])
         if merged is None:
-            return f"{head} | sources: {sources_str} | MERGE FAILED — PLN invocation error"
+            return f"BioKG found evidence for {edge_phrase}, but PLN revision failed. Sources: {sources_str}"
 
         f_m, c_m = merged
         act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
         cmp_op = ">=" if c_m >= 0.5 else "<"
         return (
-            f"{head} | sources: {sources_str} "
-            f"| MERGED {_fmt_stv(merged)} via PLN revision "
-            f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}"
+            f"BioKG found {len(sources)} evidence sources for {edge_phrase}: {sources_str}. "
+            f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
         )
 
     def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
@@ -1466,8 +1467,8 @@ class Neo4jBackend:
             return f"biokg neo4j error: {exc}"
 
         if not rows:
-            return (f"No '{safe_edge_type}' edges incident to {target_name!r} in BioKG. "
-                    f"Check the entity name and edge type.")
+            return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}. "
+                    f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking.")
 
         t_label = rows[0]["t_label"]
         t_name = rows[0]["t_name"]
@@ -1498,28 +1499,25 @@ class Neo4jBackend:
                 continue
             mean_c = sum(confs) / len(confs)
             cmax = max(confs)
-            clean_src = _clean_label(src)
-            src_segs.append(
-                f"{clean_src} n={len(confs)} mean={mean_c:.3f} max={cmax:.3f}"
-            )
+            src_segs.append(_format_source_stat(src, len(confs), mean_c, cmax))
             stvs.append((1.0, mean_c))
 
         sources_str = " + ".join(src_segs)
 
         if len(stvs) == 1:
-            return f"{header} | {sources_str} | single source — no cross-source merge"
+            return (f"BioKG found '{safe_edge_type}' evidence connected to {t_name} from one source: "
+                    f"{sources_str}. Since only one source is present, no cross-source PLN merge was needed.")
 
         merged = _run_pln_merge(stvs)
         if merged is None:
-            return f"{header} | {sources_str} | CROSS-SOURCE MERGE FAILED"
+            return f"BioKG found '{safe_edge_type}' evidence connected to {t_name}, but the cross-source PLN merge failed. Sources: {sources_str}"
 
         f_m, c_m = merged
         act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
         cmp_op = ">=" if c_m >= 0.5 else "<"
         return (
-            f"{header} | {sources_str} "
-            f"| CROSS-SOURCE MERGED {_fmt_stv(merged)} "
-            f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}"
+            f"BioKG found '{safe_edge_type}' evidence connected to {t_name} from {len(stvs)} sources: {sources_str}. "
+            f"PLN cross-source revision gives {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
         )
 
     def _format_lookup(self, name: str, rows: list, multihop_rows: Optional[list] = None) -> str:
@@ -2729,30 +2727,31 @@ class MorkBackend:
             # Check whether the edge itself exists, to give a clearer error.
             edge_probe = self._query(edge_atom, "matched")
             if not any(h == "matched" for h in edge_probe):
-                return (f"{head} | no such edge in BioKG — "
-                        f"verify entity names and edge type.")
-            return (f"{head} | edge exists but carries no (source ...) or "
-                    f"(evidence ...) annotation atoms in MORK.")
+                return (f"I did not find a BioKG edge saying that "
+                        f"{_format_edge_phrase(s_label, s_display, safe_edge_type, t_label, t_display)}. "
+                        f"Please check the entity names and edge type.")
+            return (f"I found the edge {_format_edge_phrase(s_label, s_display, safe_edge_type, t_label, t_display)}, "
+                    f"but this MORK record does not include source or evidence annotations, so PLN cannot merge evidence for it.")
+
+        edge_phrase = _format_edge_phrase(s_label, s_display, safe_edge_type, t_label, t_display)
 
         if len(sources_info) == 1:
             label, code, fc = sources_info[0]
-            return (f"{head} | single source: {label} {_fmt_stv(fc)} "
-                    f"| no merging — one source only")
+            return (f"BioKG has one evidence source for {edge_phrase}: {label} with {_fmt_stv(fc)}. "
+                    f"Because there is only one source, PLN did not perform a merge.")
 
         source_segs = [f"{lbl} {_fmt_stv(fc)}" for lbl, _, fc in sources_info]
         sources_str = " + ".join(source_segs)
 
         merged = _run_pln_merge([s[2] for s in sources_info])
         if merged is None:
-            return (f"{head} | sources: {sources_str} "
-                    f"| MERGE FAILED — PLN invocation error")
+            return f"BioKG found evidence for {edge_phrase}, but PLN revision failed. Sources: {sources_str}"
 
         f_m, c_m = merged
         act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
         cmp_op = ">=" if c_m >= 0.5 else "<"
-        return (f"{head} | sources: {sources_str} "
-                f"| MERGED {_fmt_stv(merged)} via PLN revision "
-                f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}")
+        return (f"BioKG found {len(sources_info)} evidence sources for {edge_phrase}: {sources_str}. "
+                f"PLN revision merges them to {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}.")
 
     def pln_source_aggregate(self, target_name: str, edge_type: str) -> str:
         """Cross-source consensus for all EDGE_TYPE edges incident to TARGET.
@@ -2825,9 +2824,8 @@ class MorkBackend:
                 per_source.setdefault(src, []).append(c)
 
         if not per_source:
-            return (f"{header} | no '{safe_edge_type}' edges incident to "
-                    f"{target_name!r} in BioKG. Check the entity name and "
-                    f"edge type.")
+            return (f"I did not find any BioKG '{safe_edge_type}' edges connected to {target_name!r}. "
+                    f"That means this KG snapshot does not currently support that relation for the entity, or the edge type/name needs checking.")
 
         # Per-source summary segments + stvs for the cross-source merge.
         src_segs = []
@@ -2838,28 +2836,25 @@ class MorkBackend:
                 continue
             mean_c = sum(confs) / len(confs)
             cmax = max(confs)
-            clean_src = _clean_label(src)
-            src_segs.append(
-                f"{clean_src} n={len(confs)} mean={mean_c:.3f} max={cmax:.3f}"
-            )
+            src_segs.append(_format_source_stat(src, len(confs), mean_c, cmax))
             stvs.append((1.0, mean_c))
 
         sources_str = " + ".join(src_segs)
 
         if len(stvs) == 1:
-            return f"{header} | {sources_str} | single source — no cross-source merge"
+            return (f"BioKG found '{safe_edge_type}' evidence connected to {t_display} from one source: "
+                    f"{sources_str}. Since only one source is present, no cross-source PLN merge was needed.")
 
         merged = _run_pln_merge(stvs)
         if merged is None:
-            return f"{header} | {sources_str} | CROSS-SOURCE MERGE FAILED"
+            return f"BioKG found '{safe_edge_type}' evidence connected to {t_display}, but the cross-source PLN merge failed. Sources: {sources_str}"
 
         f_m, c_m = merged
         act = "actionable" if c_m >= 0.5 else "below ACT 0.5 — hypothesize only"
         cmp_op = ">=" if c_m >= 0.5 else "<"
         return (
-            f"{header} | {sources_str} "
-            f"| CROSS-SOURCE MERGED {_fmt_stv(merged)} "
-            f"| c={c_m:.3f} {cmp_op} ACT 0.5 -> {act}"
+            f"BioKG found '{safe_edge_type}' evidence connected to {t_display} from {len(stvs)} sources: {sources_str}. "
+            f"PLN cross-source revision gives {_fmt_stv(merged)}; confidence {c_m:.3f} {cmp_op} ACT 0.5, so this is {act}."
         )
 
 
@@ -2917,7 +2912,7 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
     if not groups and not indirect_segs:
         return f"Entity: {primary} ({kind}) — no connections in BioKG."
 
-    out = f"{primary} is a {kind}. BioKG direct annotations:"
+    out = f"{primary} is a {kind}."
     group_order = [
         "Molecular functions",
         "Biological processes",
@@ -2935,17 +2930,32 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
             continue
         values = _dedupe_preserve_order(values)
         total += len(values)
-        shown = values[:8]
-        more = f"; +{len(values) - len(shown)} more" if len(values) > len(shown) else ""
-        rendered.append(f"{group} ({len(values)}): " + "; ".join(shown) + more)
+        shown = _readable_examples(values, 6)
+        rendered.append(
+            f"{_sentence_group_label(group)}: {len(values)} direct annotation(s); examples include "
+            + _human_join(shown)
+        )
     if rendered:
-        out += f" {total} total. " + " | ".join(rendered)
+        out += f" BioKG has {total} direct annotation(s) for it. " + " | ".join(rendered)
     if indirect_segs:
         indirect_segs = _dedupe_preserve_order(indirect_segs)
         shown = indirect_segs[:5]
         more = f"; +{len(indirect_segs) - len(shown)} more" if len(indirect_segs) > len(shown) else ""
         out += " | Related by 2-hop paths: " + "; ".join(shown) + more
     return out
+
+
+def _sentence_group_label(group: str) -> str:
+    labels = {
+        "Molecular functions": "Molecular functions",
+        "Biological processes": "Biological processes",
+        "Pathways": "Pathways",
+        "Diseases and phenotypes": "Disease or phenotype links",
+        "Regulatory associations": "Regulatory associations",
+        "Gene products": "Gene-product links",
+        "Other links": "Other BioKG links",
+    }
+    return labels.get(group, group)
 
 
 def _friendly_label(label: str) -> str:
@@ -2981,6 +2991,58 @@ def _lookup_group(rel: str, target_label: str, outgoing: bool) -> str:
     if target_label in ("protein", "transcript") or rel in ("translates_to", "transcribes_to"):
         return "Gene products"
     return "Other links"
+
+
+def _readable_examples(values: list, limit: int) -> list:
+    values = _dedupe_preserve_order([_clean_display_name(v) for v in values if v])
+    values.sort(key=_readability_rank)
+    return values[:limit]
+
+
+def _readability_rank(value: str):
+    text = str(value).lower()
+    preferred = (
+        "dna binding",
+        "chromatin binding",
+        "p53 binding",
+        "zinc ion binding",
+        "protein binding",
+        "enzyme binding",
+        "apoptotic",
+        "cell cycle",
+        "breast cancer",
+    )
+    for idx, phrase in enumerate(preferred):
+        if phrase in text:
+            return (0, idx, len(text), text)
+    return (1, len(text), text)
+
+
+def _clean_display_name(value: Any) -> str:
+    return str(value).replace("_", " ").strip()
+
+
+def _human_join(values: list) -> str:
+    values = [str(v) for v in values if str(v).strip()]
+    if not values:
+        return "none listed"
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return values[0] + " and " + values[1]
+    return ", ".join(values[:-1]) + ", and " + values[-1]
+
+
+def _format_edge_phrase(s_label: str, s_name: str, edge_type: str,
+                        t_label: str, t_name: str) -> str:
+    edge_words = str(edge_type or "").replace("_", " ")
+    return (f"{_clean_display_name(s_name)} ({_friendly_label(s_label)}) "
+            f"{edge_words} {_clean_display_name(t_name)} ({_friendly_label(t_label)})")
+
+
+def _format_source_stat(src: str, count: int, mean_c: float, max_c: float) -> str:
+    clean_src = _clean_display_name(src)
+    return f"{clean_src} ({count} edge(s), mean confidence {mean_c:.3f}, max {max_c:.3f})"
 
 
 def _dedupe_preserve_order(values: list) -> list:
