@@ -2585,10 +2585,10 @@ class MorkBackend:
         edge_pat = "($et ($s_l $s_id) ($t_l $t_id))"
         raw = self._transform(
             patterns=[
-                f"(staging_id {edge_pat} {sid})",
+                f"(staging_id {edge_pat} $found_sid)",
                 f"(staging_status {edge_pat} pending)",
             ],
-            template=f"({tag} $et $s_l $s_id $t_l $t_id)",
+            template=f"({tag} $found_sid $et $s_l $s_id $t_l $t_id)",
         )
 
         edge_info = None
@@ -2600,8 +2600,8 @@ class MorkBackend:
             if not inner.startswith(tag):
                 continue
             parts = inner[len(tag):].strip().split()
-            if len(parts) >= 5:
-                edge_info = tuple(parts[:5])
+            if len(parts) >= 6 and parts[0] == sid:
+                edge_info = tuple(parts[1:6])
                 break
 
         if not edge_info:
@@ -2631,8 +2631,8 @@ class MorkBackend:
         tag = f"bioclaw_reject_lookup_{uuid.uuid4().hex[:12]}"
         edge_pat = "($et ($s_l $s_id) ($t_l $t_id))"
         raw = self._transform(
-            patterns=[f"(staging_id {edge_pat} {sid})"],
-            template=f"({tag} $et $s_l $s_id $t_l $t_id)",
+            patterns=[f"(staging_id {edge_pat} $found_sid)"],
+            template=f"({tag} $found_sid $et $s_l $s_id $t_l $t_id)",
         )
 
         edge_info = None
@@ -2644,8 +2644,8 @@ class MorkBackend:
             if not inner.startswith(tag):
                 continue
             parts = inner[len(tag):].strip().split()
-            if len(parts) >= 5:
-                edge_info = tuple(parts[:5])
+            if len(parts) >= 6 and parts[0] == sid:
+                edge_info = tuple(parts[1:6])
                 break
 
         if not edge_info:
