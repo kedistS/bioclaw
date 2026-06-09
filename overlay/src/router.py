@@ -13,8 +13,13 @@ def route_direct(msgnew, msg, lastresults="") -> str:
     if os.environ.get("BIOCLAW_PROMPT", "").strip().lower() != "conductor":
         return ""
     if _truthy(msgnew):
-        return route_human_message(msg)
-    return route_last_results(lastresults)
+        routed = route_human_message(msg)
+        _route_log("human", msgnew, msg, routed or "llm")
+        return routed
+    routed = route_last_results(lastresults)
+    if routed:
+        _route_log("results", msgnew, msg, routed)
+    return routed
 
 
 def route_human_message(msg: str) -> str:
@@ -207,4 +212,18 @@ def _strip_result_tail(text: str) -> str:
 def _truthy(value) -> bool:
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"true", "1", "t", "yes"}
+    text = str(value).strip().strip('"').strip("'").strip()
+    normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+    return normalized in {"true", "1", "t", "yes"}
+
+
+def _route_log(kind: str, msgnew, msg, route: str) -> None:
+    if os.environ.get("BIOCLAW_ROUTE_LOG", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    text = biog_single_line(_clean_message(msg))
+    route_head = biog_single_line(route)[:180]
+    print(
+        f"[BIOCLAW_ROUTER] kind={kind} msgnew={str(msgnew)!r} "
+        f"text={text[:160]!r} route={route_head!r}",
+        flush=True,
+    )
