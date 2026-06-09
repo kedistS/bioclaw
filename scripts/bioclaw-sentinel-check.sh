@@ -69,3 +69,113 @@ done
 
 echo
 echo "PASS: all BioClaw sentinel outputs match across containers."
+
+echo
+echo "BioClaw routed specialist check: validating IRC/RPC-facing router paths"
+
+check_source_overlay() {
+  local container="$1"
+  docker exec -i "$container" python3 - <<'PY'
+from pathlib import Path
+
+src = Path("/PeTTa/repos/OmegaClaw-Core/src")
+required = [
+    (src / "interpretation.py", "interpret_and_record"),
+    (src / "router.py", "_specialist_send"),
+]
+
+for path, needle in required:
+    if not path.exists():
+        raise SystemExit(f"missing {path}")
+    text = path.read_text(encoding="utf-8")
+    if needle not in text:
+        raise SystemExit(f"missing {needle} in {path}")
+print("source overlay ok")
+PY
+}
+
+route_check() {
+  local container="$1"
+  local role="$2"
+  local message="$3"
+  docker exec -i \
+    -e BIOCLAW_CASE_MEMORY=false \
+    -e BIOCLAW_ANSWER_STYLE=interpreted \
+    "$container" python3 - "$role" "$message" <<'PY'
+import sys
+
+sys.path.insert(0, "/PeTTa/repos/OmegaClaw-Core/src")
+import router
+
+role = sys.argv[1]
+message = sys.argv[2]
+print(router.route_specialist_message(role, f"peer ({role}-request): [request sentinel] {message}"))
+PY
+}
+
+echo
+echo "== source overlay =="
+for container in "${containers[@]}"; do
+  printf "%s: " "$container"
+  check_source_overlay "$container"
+done
+
+assistant_summary="$tmpdir/assistant-summary.out"
+assistant_mf="$tmpdir/assistant-mf.out"
+assistant_prov="$tmpdir/assistant-prov.out"
+reasoner_enhancer="$tmpdir/reasoner-enhancer.out"
+reasoner_reconcile="$tmpdir/reasoner-reconcile.out"
+conductor_route="$tmpdir/conductor-route.out"
+
+echo
+echo "== assistant routed summary =="
+route_check bioclaw-assistant-oc assistant "what does IMPACT do?" | tee "$assistant_summary"
+require_contains "$assistant_summary" "KG support:"
+require_contains "$assistant_summary" "direct annotation"
+
+echo
+echo "== assistant routed molecular function lookup =="
+route_check bioclaw-assistant-oc assistant "what molecular functions does IMPACT enable?" | tee "$assistant_mf"
+require_contains "$assistant_mf" "IMPACT enables molecular functions"
+require_contains "$assistant_mf" "protein sequestering activity"
+
+echo
+echo "== assistant routed provenance =="
+route_check bioclaw-assistant-oc assistant "source of BRCA1 enables zinc ion binding" | tee "$assistant_prov"
+require_contains "$assistant_prov" "GOA"
+require_contains "$assistant_prov" "IEA means Inferred from Electronic Annotation"
+
+echo
+echo "== reasoner routed enhancer aggregate =="
+route_check bioclaw-reasoner-oc reasoner "is IMPACT enhancer-regulated?" | tee "$reasoner_enhancer"
+require_contains "$reasoner_enhancer" "Enhancer Atlas"
+require_contains "$reasoner_enhancer" "PEREGRINE"
+require_contains "$reasoner_enhancer" "enhancer-gene association evidence"
+
+echo
+echo "== reasoner routed reconciliation =="
+route_check bioclaw-reasoner-oc reasoner "reconcile BRCA1 enables zinc ion binding" | tee "$reasoner_reconcile"
+require_contains "$reasoner_reconcile" "GOA/IEA"
+require_contains "$reasoner_reconcile" "Single-source support"
+
+echo
+echo "== conductor routing shape =="
+docker exec -i -e BIOCLAW_PROMPT=conductor bioclaw-conductor python3 - <<'PY' | tee "$conductor_route"
+import sys
+
+sys.path.insert(0, "/PeTTa/repos/OmegaClaw-Core/src")
+import router
+
+for message in [
+    "what does IMPACT do?",
+    "is IMPACT enhancer-regulated?",
+    "propose adding edge: TP53 enables DNA binding, evidence: curator note",
+]:
+    print(router.route_direct(True, message))
+PY
+require_contains "$conductor_route" "ask-agent assistant|what does IMPACT do?"
+require_contains "$conductor_route" "ask-agent reasoner|is IMPACT enhancer-regulated?"
+require_contains "$conductor_route" "ask-agent assistant|propose adding edge: TP53 enables DNA binding, evidence: curator note"
+
+echo
+echo "PASS: BioClaw routed specialist paths are current and interpreted."
