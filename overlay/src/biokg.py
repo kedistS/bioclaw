@@ -3652,9 +3652,9 @@ def _low_information_example(value: str) -> bool:
     }
     if lower in placeholders:
         return True
-    if re.match(r"^go:?\d+$", lower, flags=re.IGNORECASE):
+    if re.match(r"^go[\s:_-]?\d+$", lower, flags=re.IGNORECASE):
         return True
-    if re.match(r"^hp:?\d+$", lower, flags=re.IGNORECASE):
+    if re.match(r"^hp[\s:_-]?\d+$", lower, flags=re.IGNORECASE):
         return True
     return False
 

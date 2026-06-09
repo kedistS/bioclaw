@@ -132,6 +132,10 @@ echo "== assistant routed summary =="
 route_check bioclaw-assistant-oc assistant "what does IMPACT do?" | tee "$assistant_summary"
 require_contains "$assistant_summary" "KG support:"
 require_contains "$assistant_summary" "direct annotation"
+if grep -Eq "GO[ _:-]?[0-9]{7}" "$assistant_summary"; then
+  echo "FAIL: routed summary leaked raw GO identifier despite named examples" >&2
+  exit 1
+fi
 
 echo
 echo "== assistant routed molecular function lookup =="
