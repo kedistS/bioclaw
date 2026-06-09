@@ -518,6 +518,7 @@ class Schema:
                     "sources": [],
                     "targets": [],
                     "pairs": [],
+                    "contracts": [],
                     "entity_names": [],
                     "entity_name": name,
                     "aliases": [],
@@ -533,6 +534,14 @@ class Schema:
                         pair = (source_label, target_label)
                         if pair not in edge["pairs"]:
                             edge["pairs"].append(pair)
+                        contract = {
+                            "source": source_label,
+                            "target": target_label,
+                            "entity_name": name,
+                            "aliases": sorted(set(aliases)),
+                        }
+                        if contract not in edge["contracts"]:
+                            edge["contracts"].append(contract)
                 if name not in edge["entity_names"]:
                     edge["entity_names"].append(name)
                 edge["aliases"] = sorted(set(edge["aliases"]).union(aliases))
@@ -667,6 +676,30 @@ def _schema_edge_aliases(schema: Optional[Schema], edge_label: str) -> set:
     return aliases
 
 
+def _schema_edge_aliases_between(schema: Optional[Schema], edge_label: str,
+                                 target_label: str, neighbor_label: str) -> set:
+    aliases = {str(edge_label).strip()} if str(edge_label or "").strip() else set()
+    if schema is None:
+        return aliases
+    edge = schema.edges.get(edge_label)
+    if not edge:
+        return aliases
+    matched = False
+    for contract in edge.get("contracts", []):
+        source = contract.get("source")
+        target = contract.get("target")
+        if ((target_label == source and neighbor_label == target) or
+                (target_label == target and neighbor_label == source)):
+            matched = True
+            aliases.update(
+                str(a).strip() for a in contract.get("aliases", [])
+                if str(a).strip()
+            )
+    if not matched and not edge.get("contracts"):
+        aliases.update(str(a).strip() for a in edge.get("aliases", []) if str(a).strip())
+    return aliases
+
+
 def _schema_edge_canonical(schema: Optional[Schema], edge_label: str) -> str:
     raw = str(edge_label or "").strip()
     if schema is None or not raw:
@@ -696,7 +729,9 @@ def _schema_neighbor_contract(schema: Optional[Schema], target_label: str,
         )
     aliases = set()
     for edge in edges:
-        aliases.update(_schema_edge_aliases(schema, edge))
+        aliases.update(_schema_edge_aliases_between(
+            schema, edge, target_label, resolved_neighbor,
+        ))
     return resolved_neighbor, edges, aliases, None
 
 
@@ -1647,6 +1682,14 @@ class Neo4jBackend:
             safe_neighbor_label = "".join(
                 c for c in str(neighbor_label).strip() if c.isalnum() or c == "_"
             ) or None
+        alias_target_label = self._resolve_label(target_name)
+        if alias_target_label and safe_neighbor_label:
+            scoped_aliases = _schema_edge_aliases_between(
+                self._schema, safe_edge_type, alias_target_label, safe_neighbor_label,
+            )
+            if scoped_aliases:
+                edge_aliases = scoped_aliases
+                edge_aliases.add(requested_edge_type)
 
         tgt_clauses = " OR ".join(f"toLower(t.{p}) = toLower($tgt)" for p in self._name_props)
         coalesce_t = "coalesce(" + ", ".join(f"t.{p}" for p in self._name_props) + ")"
@@ -3035,6 +3078,13 @@ class MorkBackend:
             return (f"error: target entity {target_name!r} not found in BioKG "
                     f"(tried properties: {', '.join(self._name_props)}).")
         t_label, t_id = tgt_entity
+        if safe_neighbor_label:
+            scoped_aliases = _schema_edge_aliases_between(
+                self._schema, safe_edge_type, t_label, safe_neighbor_label,
+            )
+            if scoped_aliases:
+                edge_aliases = scoped_aliases
+                edge_aliases.add(requested_edge_type)
         t_display = (self._resolve_id_to_name(t_label, t_id) or target_name).replace("_", " ")
 
         header = f"PLN source-aggregate | {t_label}:{t_display} via {safe_edge_type}"
