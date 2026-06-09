@@ -1,8 +1,8 @@
 """Deterministic BioClaw router.
 
-Known biocuration workflows should not depend on an LLM emitting exact tool
-syntax. This module turns common user messages into grounded BioKG/PLN calls
-and returns OmegaClaw command text such as `send ...`.
+The conductor side should only choose a specialist, not execute biology.
+AssistantOC and ReasonerOC own the detailed BioKG/PLN intent parsing and tool
+calls inside their own containers.
 """
 import os
 import re
@@ -33,6 +33,17 @@ def route_human_message(msg: str) -> str:
         return ""
     lower = text.lower().strip().rstrip(".")
 
+    if lower in {"hi", "hello", "hey", "menu"}:
+        return _send(
+            "Hi. I orchestrate two specialists: AssistantOC handles BioKG lookups, provenance, explanations, and proposals; "
+            "ReasonerOC handles evidence merging, cross-source confidence, and hypothesis-style reasoning."
+        )
+
+    if lower in {"what can you do", "list specialists", "help"}:
+        return _send(
+            "I route biology work to AssistantOC for curation and BioKG lookups, or ReasonerOC for formal evidence and confidence reasoning."
+        )
+
     m = re.match(r"^approve\s+([0-9a-f]{8})$", lower)
     if m:
         import biokg
@@ -47,40 +58,7 @@ def route_human_message(msg: str) -> str:
         import biokg
         return _send(biog_single_line(biokg.list_staging()))
 
-    entity = _activity_summary_entity(text)
-    if entity:
-        return _ask("assistant", text)
-
-    schema_lookup = _schema_neighbor_lookup_request(text)
-    if schema_lookup:
-        return _ask("assistant", text)
-
-    entity = _lookup_entity(text)
-    if entity:
-        return _ask("assistant", text)
-
-    edge = _edge_question(text, prefixes=("who said ", "source of ", "evidence for "))
-    if edge:
-        return _ask("assistant", text)
-
-    edge = _edge_question(text, prefixes=("reconcile ", "merge evidence for "))
-    if edge:
-        return _ask("reasoner", text)
-
-    aggregate = _source_aggregate_request(text)
-    if aggregate:
-        return _ask("reasoner", text)
-
-    staged = _stage_request(text)
-    if staged:
-        import biokg
-        result = biokg.stage_pipe("|".join(staged))
-        sid = _staging_id(result)
-        if sid:
-            result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
-        return _send(result)
-
-    return ""
+    return _ask(_conductor_specialist_for(text), text)
 
 
 def route_specialist_message(role: str, msg: str) -> str:
@@ -109,6 +87,15 @@ def route_specialist_message(role: str, msg: str) -> str:
             import biokg
             return _send(biokg.provenance("|".join(edge)))
 
+        staged = _stage_request(text)
+        if staged:
+            import biokg
+            result = biokg.stage_pipe("|".join(staged))
+            sid = _staging_id(result)
+            if sid:
+                result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
+            return _send(result)
+
     if role == "reasoner":
         edge = _edge_question(text, prefixes=("reconcile ", "merge evidence for "))
         if edge:
@@ -124,6 +111,32 @@ def route_specialist_message(role: str, msg: str) -> str:
             return _send(biokg.pln_source_aggregate_pipe("|".join(values)))
 
     return ""
+
+
+def _conductor_specialist_for(text: str) -> str:
+    """Coarse workflow routing only. Detailed biology parsing belongs to specialists."""
+    q = re.sub(r"\s+", " ", text).strip().lower().rstrip("?.!")
+    reasoner_starts = (
+        "reconcile ",
+        "merge evidence for ",
+        "aggregate evidence ",
+        "aggregate sources ",
+        "source aggregate ",
+        "source-aggregate ",
+        "cross-method confidence ",
+        "consensus ",
+        "hypothesize ",
+        "generate hypothesis ",
+    )
+    if q.startswith(reasoner_starts):
+        return "reasoner"
+    if re.match(
+        r"^(?:is|are)\s+.+?\s+.+?[-\s]?(?:regulated|associated|linked|connected)$",
+        q,
+        flags=re.IGNORECASE,
+    ):
+        return "reasoner"
+    return "assistant"
 
 
 def route_last_results(lastresults: str) -> str:
