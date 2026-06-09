@@ -476,7 +476,7 @@ class Schema:
         self._raw = entries
         # Pre-compute node label -> name property (resolves is_a inheritance)
         self.entities: dict = {}   # neo4j_label -> {"name_prop": str, "entity_name": str}
-        self.edges: dict = {}      # edge_label (Neo4j relationship type) -> {"sources": [labels], "targets": [labels], "entity_name": str}
+        self.edges: dict = {}      # edge_label (Neo4j relationship type) -> schema contract metadata
         self._build()
 
     def _build(self):
@@ -511,12 +511,31 @@ class Schema:
                 targets = body.get("target")
                 if sources is None or targets is None:
                     continue
-                self.edges[str(rel).strip()] = {
-                    "sources": [self._entity_label(s) for s in _aslist(sources)],
-                    "targets": [self._entity_label(t) for t in _aslist(targets)],
+                rel = str(rel).strip()
+                source_labels = [self._entity_label(s) for s in _aslist(sources)]
+                target_labels = [self._entity_label(t) for t in _aslist(targets)]
+                edge = self.edges.setdefault(rel, {
+                    "sources": [],
+                    "targets": [],
+                    "pairs": [],
+                    "entity_names": [],
                     "entity_name": name,
-                    "aliases": sorted(set(aliases)),
-                }
+                    "aliases": [],
+                })
+                for source_label in source_labels:
+                    if source_label not in edge["sources"]:
+                        edge["sources"].append(source_label)
+                for target_label in target_labels:
+                    if target_label not in edge["targets"]:
+                        edge["targets"].append(target_label)
+                for source_label in source_labels:
+                    for target_label in target_labels:
+                        pair = (source_label, target_label)
+                        if pair not in edge["pairs"]:
+                            edge["pairs"].append(pair)
+                if name not in edge["entity_names"]:
+                    edge["entity_names"].append(name)
+                edge["aliases"] = sorted(set(edge["aliases"]).union(aliases))
 
     def _resolve_name_property(self, entity_name: str, _seen=None) -> str:
         """Walk is_a chain to find the property annotated `biolink: name`."""
@@ -577,12 +596,10 @@ class Schema:
         if edge is None:
             return False, (f"edge type {edge_label!r} is not in the loaded schema. "
                            f"Known edges: {', '.join(sorted(self.edges)) or '(none)'}")
-        if source_label not in edge["sources"]:
-            return False, (f"edge {edge_label!r} expects source type in "
-                           f"{edge['sources']} but got {source_label!r}")
-        if target_label not in edge["targets"]:
-            return False, (f"edge {edge_label!r} expects target type in "
-                           f"{edge['targets']} but got {target_label!r}")
+        if (source_label, target_label) not in edge.get("pairs", []):
+            pairs = ", ".join(f"{s}->{t}" for s, t in edge.get("pairs", []))
+            return False, (f"edge {edge_label!r} expects source->target in "
+                           f"{pairs or '(none)'} but got {source_label!r}->{target_label!r}")
         return True, "ok"
 
     def summary(self) -> str:
@@ -593,7 +610,8 @@ class Schema:
         lines.append("Edges (label : source(s) -> target(s)):")
         for label in sorted(self.edges):
             e = self.edges[label]
-            lines.append(f"  {label} : {','.join(e['sources'])} -> {','.join(e['targets'])}")
+            pairs = ", ".join(f"{s}->{t}" for s, t in e.get("pairs", []))
+            lines.append(f"  {label} : {pairs}")
         return "\n".join(lines)
 
 
@@ -631,12 +649,11 @@ def _schema_edges_between(schema: Optional[Schema], target_label: str,
         return []
     out = []
     for edge_label, edge in schema.edges.items():
-        sources = set(edge.get("sources") or [])
-        targets = set(edge.get("targets") or [])
-        if target_label in sources and neighbor_label in targets:
-            out.append(edge_label)
-        elif target_label in targets and neighbor_label in sources:
-            out.append(edge_label)
+        for source, target in edge.get("pairs", []):
+            if target_label == source and neighbor_label == target:
+                out.append(edge_label)
+            elif target_label == target and neighbor_label == source:
+                out.append(edge_label)
     return sorted(set(out))
 
 
@@ -648,6 +665,20 @@ def _schema_edge_aliases(schema: Optional[Schema], edge_label: str) -> set:
     if edge:
         aliases.update(str(a).strip() for a in edge.get("aliases", []) if str(a).strip())
     return aliases
+
+
+def _schema_edge_canonical(schema: Optional[Schema], edge_label: str) -> str:
+    raw = str(edge_label or "").strip()
+    if schema is None or not raw:
+        return raw
+    if raw in schema.edges:
+        return raw
+    wanted = _schema_token(raw)
+    for canonical, edge in schema.edges.items():
+        for alias in edge.get("aliases", []):
+            if str(alias).strip() == raw or _schema_token(alias) == wanted:
+                return canonical
+    return raw
 
 
 def _schema_neighbor_contract(schema: Optional[Schema], target_label: str,
@@ -663,13 +694,9 @@ def _schema_neighbor_contract(schema: Optional[Schema], target_label: str,
             f"error: schema has no edge connecting {target_label!r} and "
             f"{resolved_neighbor!r}; specify the edge type explicitly."
         )
-    if len(edges) > 1:
-        return resolved_neighbor, edges, set(), (
-            f"error: schema has multiple edges connecting {target_label!r} and "
-            f"{resolved_neighbor!r}: {', '.join(edges)}. Specify the edge type explicitly."
-        )
-    edge = edges[0]
-    aliases = _schema_edge_aliases(schema, edge)
+    aliases = set()
+    for edge in edges:
+        aliases.update(_schema_edge_aliases(schema, edge))
     return resolved_neighbor, edges, aliases, None
 
 
@@ -1569,7 +1596,15 @@ class Neo4jBackend:
         )
         if error:
             return error
-        return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
+        if len(edges) == 1:
+            return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
+        parts = []
+        for edge in edges:
+            parts.append(f"{edge}: {self.pln_source_aggregate(target_name, edge, resolved_neighbor)}")
+        return (
+            f"Schema maps {target_label} + {resolved_neighbor} to {len(edges)} edge types. "
+            + " | ".join(parts)
+        )
 
     def schema_neighbor(self, target_name: str, neighbor_label: str) -> str:
         if self._schema is None:
@@ -1583,8 +1618,9 @@ class Neo4jBackend:
         )
         if error:
             return error
+        edge_word = "edge" if len(edges) == 1 else "edges"
         return (
-            f"Schema maps {target_label} + {resolved_neighbor} to edge {edges[0]}. "
+            f"Schema maps {target_label} + {resolved_neighbor} to {edge_word} {', '.join(edges)}. "
             f"Accepted schema aliases: {', '.join(sorted(aliases))}."
         )
 
@@ -1602,7 +1638,10 @@ class Neo4jBackend:
         safe_edge_type = "".join(c for c in str(edge_type).strip() if c.isalnum() or c == "_")
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r}"
+        requested_edge_type = safe_edge_type
+        safe_edge_type = _schema_edge_canonical(self._schema, safe_edge_type)
         edge_aliases = _schema_edge_aliases(self._schema, safe_edge_type)
+        edge_aliases.add(requested_edge_type)
         safe_neighbor_label = None
         if neighbor_label:
             safe_neighbor_label = "".join(
@@ -2938,7 +2977,15 @@ class MorkBackend:
         )
         if error:
             return error
-        return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
+        if len(edges) == 1:
+            return self.pln_source_aggregate(target_name, edges[0], resolved_neighbor)
+        parts = []
+        for edge in edges:
+            parts.append(f"{edge}: {self.pln_source_aggregate(target_name, edge, resolved_neighbor)}")
+        return (
+            f"Schema maps {target_label} + {resolved_neighbor} to {len(edges)} edge types. "
+            + " | ".join(parts)
+        )
 
     def schema_neighbor(self, target_name: str, neighbor_label: str) -> str:
         if self._schema is None:
@@ -2953,8 +3000,9 @@ class MorkBackend:
         )
         if error:
             return error
+        edge_word = "edge" if len(edges) == 1 else "edges"
         return (
-            f"Schema maps {target_label} + {resolved_neighbor} to edge {edges[0]}. "
+            f"Schema maps {target_label} + {resolved_neighbor} to {edge_word} {', '.join(edges)}. "
             f"Accepted schema aliases: {', '.join(sorted(aliases))}."
         )
 
@@ -2972,7 +3020,10 @@ class MorkBackend:
         )
         if not safe_edge_type:
             return f"error: invalid edge_type {edge_type!r}"
+        requested_edge_type = safe_edge_type
+        safe_edge_type = _schema_edge_canonical(self._schema, safe_edge_type)
         edge_aliases = _schema_edge_aliases(self._schema, safe_edge_type)
+        edge_aliases.add(requested_edge_type)
         safe_neighbor_label = None
         if neighbor_label:
             safe_neighbor_label = "".join(
