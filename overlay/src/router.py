@@ -70,22 +70,28 @@ def route_specialist_message(role: str, msg: str) -> str:
         entity = _activity_summary_entity(text)
         if entity:
             import biokg
-            return _send(biokg.functional_summary(entity))
+            tool = f"biokg.functional_summary({entity})"
+            return _specialist_send(role, tool, text, biokg.functional_summary(entity))
 
         schema_lookup = _schema_neighbor_lookup_request(text)
         if schema_lookup:
             import biokg
-            return _send(biokg.schema_neighbor_lookup_pipe("|".join(schema_lookup)))
+            payload = "|".join(schema_lookup)
+            tool = f"biokg.schema_neighbor_lookup_pipe({payload})"
+            return _specialist_send(role, tool, text, biokg.schema_neighbor_lookup_pipe(payload))
 
         entity = _lookup_entity(text)
         if entity:
             import biokg
-            return _send(biokg.lookup(entity))
+            tool = f"biokg.lookup({entity})"
+            return _specialist_send(role, tool, text, biokg.lookup(entity))
 
         edge = _edge_question(text, prefixes=("who said ", "source of ", "evidence for "))
         if edge:
             import biokg
-            return _send(biokg.provenance("|".join(edge)))
+            payload = "|".join(edge)
+            tool = f"biokg.provenance({payload})"
+            return _specialist_send(role, tool, text, biokg.provenance(payload))
 
         staged = _stage_request(text)
         if staged:
@@ -94,21 +100,27 @@ def route_specialist_message(role: str, msg: str) -> str:
             sid = _staging_id(result)
             if sid:
                 result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
-            return _send(result)
+            tool = f"biokg.stage_pipe({'|'.join(staged)})"
+            return _specialist_send(role, tool, text, result, interpret=False)
 
     if role == "reasoner":
         edge = _edge_question(text, prefixes=("reconcile ", "merge evidence for "))
         if edge:
             import biokg
-            return _send(biokg.pln_evidence_merge_pipe("|".join(edge)))
+            payload = "|".join(edge)
+            tool = f"biokg.pln_evidence_merge_pipe({payload})"
+            return _specialist_send(role, tool, text, biokg.pln_evidence_merge_pipe(payload))
 
         aggregate = _source_aggregate_request(text)
         if aggregate:
             import biokg
             mode, values = aggregate
+            payload = "|".join(values)
             if mode == "schema-neighbor":
-                return _send(biokg.pln_schema_neighbor_aggregate_pipe("|".join(values)))
-            return _send(biokg.pln_source_aggregate_pipe("|".join(values)))
+                tool = f"biokg.pln_schema_neighbor_aggregate_pipe({payload})"
+                return _specialist_send(role, tool, text, biokg.pln_schema_neighbor_aggregate_pipe(payload))
+            tool = f"biokg.pln_source_aggregate_pipe({payload})"
+            return _specialist_send(role, tool, text, biokg.pln_source_aggregate_pipe(payload))
 
     return ""
 
@@ -286,6 +298,19 @@ def _decode(text: str) -> str:
 
 def _send(text: str) -> str:
     return "send " + biog_single_line(text)
+
+
+def _specialist_send(role: str, tool_call: str, user_text: str, raw_result: str, interpret: bool = True) -> str:
+    try:
+        import interpretation
+        if interpret:
+            text = interpretation.interpret_and_record(role, tool_call, user_text, raw_result)
+        else:
+            text = interpretation.record_only(role, tool_call, user_text, raw_result)
+    except Exception as exc:
+        print(f"[BIOCLAW_ROUTER] interpretation failed: {exc}", flush=True)
+        text = raw_result
+    return _send(text)
 
 
 def _ask(role: str, text: str) -> str:

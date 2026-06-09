@@ -3607,12 +3607,15 @@ def _readable_examples(values: list, limit: int) -> list:
     """Choose deterministic examples for compact display.
 
     We do not ask an LLM to choose. Keep the ordering gene-agnostic: avoid
-    spotlighting entity-specific phrases, lightly deprioritize very broad
-    ontology labels, then prefer concise names before long labels.
+    spotlighting entity-specific phrases, remove low-information ontology
+    placeholders when better names exist, then prefer concise names before
+    long labels.
     """
     values = _dedupe_preserve_order([_clean_display_name(v) for v in values if v])
-    values.sort(key=_readability_rank)
-    return values[:limit]
+    informative = [v for v in values if not _low_information_example(v)]
+    chosen = informative if informative else values
+    chosen.sort(key=_readability_rank)
+    return chosen[:limit]
 
 
 def _readability_rank(value: str):
@@ -3630,6 +3633,30 @@ def _readability_rank(value: str):
     broad = 1 if text in broad_terms else 0
     vague_binding = 1 if text.endswith(" binding") and len(text.split()) <= 2 else 0
     return (broad, vague_binding, len(text), text)
+
+
+def _low_information_example(value: str) -> bool:
+    text = str(value or "").strip()
+    lower = text.lower()
+    placeholders = {
+        "molecular function",
+        "biological process",
+        "cellular component",
+        "disease",
+        "phenotype",
+        "pathway",
+        "gene",
+        "protein",
+        "transcript",
+        "enhancer",
+    }
+    if lower in placeholders:
+        return True
+    if re.match(r"^go:?\d+$", lower, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^hp:?\d+$", lower, flags=re.IGNORECASE):
+        return True
+    return False
 
 
 def _clean_display_name(value: Any) -> str:
