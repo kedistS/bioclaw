@@ -10,7 +10,12 @@ import re
 
 def route_direct(msgnew, msg, lastresults="") -> str:
     """Return an OmegaClaw command string, or "" to let the LLM handle it."""
-    if os.environ.get("BIOCLAW_PROMPT", "").strip().lower() != "conductor":
+    role = os.environ.get("BIOCLAW_PROMPT", "").strip().lower()
+    if role != "conductor":
+        if _truthy(msgnew) and role in {"assistant", "reasoner"}:
+            routed = route_specialist_message(role, msg)
+            _route_log(role, msgnew, msg, routed or "llm")
+            return routed
         return ""
     if _truthy(msgnew):
         routed = route_human_message(msg)
@@ -42,28 +47,29 @@ def route_human_message(msg: str) -> str:
         import biokg
         return _send(biog_single_line(biokg.list_staging()))
 
+    entity = _activity_summary_entity(text)
+    if entity:
+        return _ask("assistant", text)
+
+    schema_lookup = _schema_neighbor_lookup_request(text)
+    if schema_lookup:
+        return _ask("assistant", text)
+
     entity = _lookup_entity(text)
     if entity:
-        import biokg
-        return _send(biokg.lookup(entity))
+        return _ask("assistant", text)
 
     edge = _edge_question(text, prefixes=("who said ", "source of ", "evidence for "))
     if edge:
-        import biokg
-        return _send(biokg.provenance("|".join(edge)))
+        return _ask("assistant", text)
 
     edge = _edge_question(text, prefixes=("reconcile ", "merge evidence for "))
     if edge:
-        import biokg
-        return _send(biokg.pln_evidence_merge_pipe("|".join(edge)))
+        return _ask("reasoner", text)
 
     aggregate = _source_aggregate_request(text)
     if aggregate:
-        import biokg
-        mode, values = aggregate
-        if mode == "schema-neighbor":
-            return _send(biokg.pln_schema_neighbor_aggregate_pipe("|".join(values)))
-        return _send(biokg.pln_source_aggregate_pipe("|".join(values)))
+        return _ask("reasoner", text)
 
     staged = _stage_request(text)
     if staged:
@@ -73,6 +79,49 @@ def route_human_message(msg: str) -> str:
         if sid:
             result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
         return _send(result)
+
+    return ""
+
+
+def route_specialist_message(role: str, msg: str) -> str:
+    text = _clean_peer_message(msg)
+    if not text:
+        return ""
+
+    if role == "assistant":
+        entity = _activity_summary_entity(text)
+        if entity:
+            import biokg
+            return _send(biokg.functional_summary(entity))
+
+        schema_lookup = _schema_neighbor_lookup_request(text)
+        if schema_lookup:
+            import biokg
+            return _send(biokg.schema_neighbor_lookup_pipe("|".join(schema_lookup)))
+
+        entity = _lookup_entity(text)
+        if entity:
+            import biokg
+            return _send(biokg.lookup(entity))
+
+        edge = _edge_question(text, prefixes=("who said ", "source of ", "evidence for "))
+        if edge:
+            import biokg
+            return _send(biokg.provenance("|".join(edge)))
+
+    if role == "reasoner":
+        edge = _edge_question(text, prefixes=("reconcile ", "merge evidence for "))
+        if edge:
+            import biokg
+            return _send(biokg.pln_evidence_merge_pipe("|".join(edge)))
+
+        aggregate = _source_aggregate_request(text)
+        if aggregate:
+            import biokg
+            mode, values = aggregate
+            if mode == "schema-neighbor":
+                return _send(biokg.pln_schema_neighbor_aggregate_pipe("|".join(values)))
+            return _send(biokg.pln_source_aggregate_pipe("|".join(values)))
 
     return ""
 
@@ -103,6 +152,31 @@ def _lookup_entity(text: str) -> str:
         if m:
             return m.group(group).strip()
     return ""
+
+
+def _activity_summary_entity(text: str) -> str:
+    q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
+    m = re.match(r"^what\s+does\s+(.+?)\s+do$", q, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _schema_neighbor_lookup_request(text: str):
+    q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
+    patterns = (
+        (r"^what\s+molecular\s+functions?\s+does\s+(.+?)\s+enable$", "molecular function"),
+        (r"^what\s+functions?\s+does\s+(.+?)\s+enable$", "molecular function"),
+        (r"^what\s+biological\s+process(?:es)?\s+is\s+(.+?)\s+involved\s+in$", "biological process"),
+        (r"^is\s+(.+?)\s+involved\s+in\s+biological\s+process(?:es)?$", "biological process"),
+        (r"^what\s+cellular\s+components?\s+is\s+(.+?)\s+located\s+in$", "cellular component"),
+        (r"^is\s+(.+?)\s+located\s+in\s+cellular\s+component(?:s)?$", "cellular component"),
+        (r"^what\s+pathways?\s+does\s+(.+?)\s+participate\s+in$", "pathway"),
+        (r"^what\s+diseases?\s+is\s+(.+?)\s+associated\s+with$", "disease"),
+    )
+    for pattern, neighbor in patterns:
+        m = re.match(pattern, q, flags=re.IGNORECASE)
+        if m:
+            return [m.group(1).strip(), neighbor]
+    return None
 
 
 def _edge_question(text: str, prefixes: tuple):
@@ -180,6 +254,14 @@ def _clean_message(msg: str) -> str:
     return text
 
 
+def _clean_peer_message(msg: str) -> str:
+    text = _decode(msg).strip().strip('"').strip("'").strip()
+    m = re.match(r"^peer\s+\((assistant|reasoner)-request\)\s*:\s*(.+)$", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(2).strip()
+    return _clean_message(text)
+
+
 def _decode(text: str) -> str:
     return (str(text)
             .replace("_quote_", '"')
@@ -189,6 +271,10 @@ def _decode(text: str) -> str:
 
 def _send(text: str) -> str:
     return "send " + biog_single_line(text)
+
+
+def _ask(role: str, text: str) -> str:
+    return f"ask-agent {role}|{biog_single_line(text)}"
 
 
 def biog_single_line(text: str) -> str:

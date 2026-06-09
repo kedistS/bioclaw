@@ -165,14 +165,15 @@ def ask(role, query, timeout=None):
     if not query:
         return "error: query is required"
 
-    if role == "reasoner":
-        reply = _reasoner_fast_path(query)
-        if reply is not None:
-            return _relay(role, reply)
-    elif role == "assistant":
-        reply = _assistant_fast_path(query)
-        if reply is not None:
-            return _relay(role, reply)
+    if _truthy(os.environ.get("BIOCLAW_CONDUCTOR_PEER_FAST_PATH", "false")):
+        if role == "reasoner":
+            reply = _reasoner_fast_path(query)
+            if reply is not None:
+                return _relay(role, reply)
+        elif role == "assistant":
+            reply = _assistant_fast_path(query)
+            if reply is not None:
+                return _relay(role, reply)
 
     peers = _peers()
     base = peers.get(role)
@@ -219,6 +220,14 @@ def _flatten_for_relay(text: str) -> str:
         return text
     # \r\n and \r first so we don't double-escape.
     return text.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().strip('"').strip("'").strip()
+    normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+    return normalized in {"true", "1", "t", "yes"}
 
 
 def ask_pipe(combined):

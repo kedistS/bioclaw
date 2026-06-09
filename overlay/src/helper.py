@@ -106,7 +106,7 @@ KNOWN_SKILLS = {
     # BioClaw biokg-* skills (full surface — covers Phase 1 + planned skills)
     "biokg-lookup", "biokg-query",
     "biokg-stage", "biokg-list-staging", "biokg-promote", "biokg-reject",
-    "biokg-schema", "biokg-schema-neighbor",
+    "biokg-schema", "biokg-schema-neighbor", "biokg-schema-neighbor-lookup",
     "biokg-provenance", "biokg-source",
     "biokg-recent-autonomous",
     "biokg-pln-evidence-merge", "biokg-pln-source-aggregate",

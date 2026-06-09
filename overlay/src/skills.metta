@@ -85,6 +85,8 @@
     "  the edge type is implied by the loaded schema."
     "- Inspect schema mapping for a target entity and neighboring node label: biokg-schema-neighbor TARGET_NAME|NEIGHBOR_LABEL"
     "  Returns the resolved node labels, schema edge, and accepted aliases."
+    "- Schema-derived direct annotation summary: biokg-schema-neighbor-lookup TARGET_NAME|NEIGHBOR_LABEL"
+    "  Lists compact examples for direct edges between TARGET_NAME and that neighboring node type."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -154,6 +156,9 @@
 
 (= (biokg-schema-neighbor $combined)
    (py-call (biokg.schema_neighbor_pipe $combined)))
+
+(= (biokg-schema-neighbor-lookup $combined)
+   (py-call (biokg.schema_neighbor_lookup_pipe $combined)))
 
 (= (biokg-provenance $name)
    (py-call (biokg.provenance $name)))

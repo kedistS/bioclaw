@@ -463,6 +463,43 @@ def schema_neighbor_pipe(combined: str) -> str:
     return _get_backend().schema_neighbor(target, neighbor_label)
 
 
+def schema_neighbor_lookup_pipe(combined: str) -> str:
+    """Schema-derived direct annotation summary. Format: TARGET_NAME|NEIGHBOR_LABEL"""
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) != 2 or not all(parts):
+        return ("error: biokg-schema-neighbor-lookup format is TARGET_NAME|NEIGHBOR_LABEL.\n"
+                "Example: biokg-schema-neighbor-lookup TARGET_ENTITY|NEIGHBOR_LABEL")
+    target, neighbor_label = parts
+    return _get_backend().schema_neighbor_lookup(target, neighbor_label)
+
+
+def functional_summary(name: str) -> str:
+    """Compact schema-derived gene activity summary for broad 'what does X do?' questions."""
+    target = str(name).strip().strip('"').strip("'").strip()
+    if not target:
+        return "error: biokg-functional-summary requires a non-empty name"
+    backend = _get_backend()
+    segments = []
+    for neighbor in (
+        "molecular function",
+        "biological process",
+        "cellular component",
+        "pathway",
+        "enhancer",
+        "disease",
+    ):
+        result = backend.schema_neighbor_lookup(target, neighbor)
+        if result.startswith(("error:", "biokg unavailable")):
+            continue
+        if result.startswith("I did not find"):
+            continue
+        segments.append(result)
+    if segments:
+        return " ".join(segments[:4])
+    return lookup(target)
+
+
 # ─── BioCypher schema loader ────────────────────────────────────────────────
 # Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
 #   entities[label] = { name_prop, all_labels (incl. inherited) }
@@ -931,6 +968,9 @@ class DisabledBackend:
 
     def schema_neighbor(self, target_name: str, neighbor_label: str) -> str:
         return f"biokg unavailable ({self._reason}); cannot inspect schema-neighbor mapping"
+
+    def schema_neighbor_lookup(self, target_name: str, neighbor_label: str) -> str:
+        return f"biokg unavailable ({self._reason}); cannot summarize schema-neighbor annotations"
 
 
 class Neo4jBackend:
@@ -1657,6 +1697,48 @@ class Neo4jBackend:
         return (
             f"Schema maps {target_label} + {resolved_neighbor} to {edge_word} {', '.join(edges)}. "
             f"Accepted schema aliases: {', '.join(sorted(aliases))}."
+        )
+
+    def schema_neighbor_lookup(self, target_name: str, neighbor_label: str) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_label = self._resolve_label(target_name)
+        if not target_label:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        resolved_neighbor, edges, aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        edge_types = "|".join(f"`{edge}`" for edge in edges)
+        neighbor_name_prop = self._schema.entity_name_prop(resolved_neighbor) or "id"
+        target_name_prop = self._schema.entity_name_prop(target_label) or "id"
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_NEIGHBOR_LOOKUP_LIMIT", "1000"))
+        except (TypeError, ValueError):
+            limit = 1000
+        cypher = (
+            f"MATCH (t:`{target_label}`) WHERE toLower(t.{target_name_prop}) = toLower($target) "
+            f"MATCH (t)-[r:{edge_types}]-(n:`{resolved_neighbor}`) "
+            f"RETURN coalesce(t.{target_name_prop}, $target) AS target_name, "
+            f"       type(r) AS edge, coalesce(n.{neighbor_name_prop}, n.id) AS neighbor_name "
+            f"LIMIT {max(limit, 1)}"
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(cypher, target=str(target_name).strip()))
+        except Exception as exc:
+            return f"biokg neo4j error: {exc}"
+        examples = [r.get("neighbor_name") for r in rows]
+        edge_counts = {}
+        for r in rows:
+            edge = r.get("edge") or "?"
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+        display = rows[0].get("target_name") if rows else str(target_name).strip()
+        return _format_schema_neighbor_lookup_result(
+            display, target_label, resolved_neighbor, edges, examples, edge_counts, aliases,
+            capped=(len(rows) >= max(limit, 1)),
         )
 
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
@@ -3049,6 +3131,77 @@ class MorkBackend:
             f"Accepted schema aliases: {', '.join(sorted(aliases))}."
         )
 
+    def schema_neighbor_lookup(self, target_name: str, neighbor_label: str) -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_entity = self._resolve_name(target_name)
+        if not target_entity:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        target_label, target_id = target_entity
+        target_display = (self._resolve_id_to_name(target_label, target_id) or target_name).replace("_", " ")
+        resolved_neighbor, edges, aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_NEIGHBOR_LOOKUP_LIMIT", "1000"))
+        except (TypeError, ValueError):
+            limit = 1000
+        limit = max(limit, 1)
+
+        rows = []
+        capped = False
+        import uuid
+        for edge in edges:
+            for direction, pattern in (
+                ("in", f"({edge} ($o_label $o_id) ({target_label} {target_id}))"),
+                ("out", f"({edge} ({target_label} {target_id}) ($o_label $o_id))"),
+            ):
+                tag = f"bioclaw_schema_lookup_{direction}_{uuid.uuid4().hex[:12]}"
+                raw = self._transform(
+                    patterns=[pattern],
+                    template=f"({tag} $o_label $o_id)",
+                )
+                for line in raw:
+                    s = line.strip()
+                    if not (s.startswith("(") and s.endswith(")")):
+                        continue
+                    inner = s[1:-1].strip()
+                    if not inner.startswith(tag):
+                        continue
+                    parts = inner[len(tag):].strip().split()
+                    if len(parts) < 2:
+                        continue
+                    o_label, o_id = parts[0], " ".join(parts[1:])
+                    if o_label != resolved_neighbor:
+                        continue
+                    rows.append((edge, o_label, o_id))
+                    if len(rows) >= limit:
+                        capped = True
+                        break
+                if capped:
+                    break
+            if capped:
+                break
+
+        seen = set()
+        examples = []
+        edge_counts = {}
+        for edge, o_label, o_id in rows:
+            key = (edge, o_label, o_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+            examples.append((self._resolve_id_to_name(o_label, o_id) or o_id).replace("_", " "))
+
+        return _format_schema_neighbor_lookup_result(
+            target_display, target_label, resolved_neighbor, edges, examples, edge_counts, aliases,
+            capped=capped,
+        )
+
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all EDGE_TYPE edges incident to TARGET.
 
@@ -3356,6 +3509,50 @@ def _format_lookup_result(name: str, rows: list, multihop_rows: Optional[list] =
         more = f"; +{len(indirect_segs) - len(shown)} more" if len(indirect_segs) > len(shown) else ""
         out += " | Related by 2-hop paths: " + "; ".join(shown) + more
     return out
+
+
+def _format_schema_neighbor_lookup_result(target_name: str, target_label: str,
+                                          neighbor_label: str, edges: list,
+                                          examples: list, edge_counts: dict,
+                                          aliases: set, capped: bool = False) -> str:
+    display = _clean_display_name(target_name)
+    neighbor_friendly = _friendly_label(neighbor_label)
+    examples = _dedupe_preserve_order([_clean_display_name(v) for v in examples if v])
+    total = sum(edge_counts.values()) if edge_counts else len(examples)
+    if not examples:
+        edge_word = "edge" if len(edges) == 1 else "edges"
+        alias_text = f" Expected schema aliases: {', '.join(sorted(aliases))}." if aliases else ""
+        return (
+            f"I did not find BioKG {edge_word} {', '.join(edges)} connecting "
+            f"{display} ({_friendly_label(target_label)}) to {neighbor_friendly} nodes."
+            f"{alias_text}"
+        )
+    shown = _readable_examples(examples, 6)
+    cap_note = " or more" if capped else ""
+    counts = ", ".join(f"{edge}={count}" for edge, count in sorted(edge_counts.items()))
+    count_note = f" across {counts}" if counts and len(edges) > 1 else ""
+    return (
+        f"{_schema_neighbor_opening(display, neighbor_label, edges)} "
+        f"BioKG shows {total}{cap_note} direct annotation(s){count_note}; "
+        f"examples include {_human_join(shown)}."
+    )
+
+
+def _schema_neighbor_opening(target_name: str, neighbor_label: str, edges: list) -> str:
+    edge_set = set(edges or [])
+    if neighbor_label == "molecular_function" or "enables" in edge_set:
+        return f"{target_name} enables molecular functions."
+    if neighbor_label == "biological_process" or "involved_in" in edge_set:
+        return f"{target_name} is involved in biological processes."
+    if neighbor_label == "cellular_component" or "located_in" in edge_set:
+        return f"{target_name} is annotated to cellular components."
+    if neighbor_label == "pathway" or "participates_in" in edge_set:
+        return f"{target_name} participates in pathways."
+    if neighbor_label == "enhancer":
+        return f"{target_name} has enhancer associations."
+    if neighbor_label == "disease":
+        return f"{target_name} has disease associations."
+    return f"{target_name} is connected to {_friendly_label(neighbor_label)} nodes."
 
 
 def _sentence_group_label(group: str) -> str:
