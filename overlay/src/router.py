@@ -271,7 +271,9 @@ def _clean_peer_message(msg: str) -> str:
     text = _decode(msg).strip().strip('"').strip("'").strip()
     m = re.match(r"^peer\s+\((assistant|reasoner)-request\)\s*:\s*(.+)$", text, flags=re.IGNORECASE)
     if m:
-        return m.group(2).strip()
+        body = m.group(2).strip()
+        body = re.sub(r"^\[request\s+[0-9A-Za-z_.:-]+\]\s*", "", body)
+        return body.strip()
     return _clean_message(text)
 
 

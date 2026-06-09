@@ -113,8 +113,10 @@ class _Handler(BaseHTTPRequestHandler):
         timeout = float(payload.get("timeout", 60))
 
         slot = _ResponseSlot()
-        # Tag with role so the agent prompt sees it as a peer call
-        framed = f"peer ({_role}-request): {text}"
+        # Tag with role so the agent prompt sees it as a peer call. Include a
+        # unique request marker so repeated identical queries are still new
+        # OmegaClaw messages; specialists strip the marker before parsing.
+        framed = f"peer ({_role}-request): [request {time.time_ns()}] {text}"
         _inbox.put((framed, slot))
 
         reply = slot.wait(timeout=timeout)
