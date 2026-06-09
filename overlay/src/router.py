@@ -58,7 +58,7 @@ def route_human_message(msg: str) -> str:
         import biokg
         return _send(biog_single_line(biokg.list_staging()))
 
-    return _ask(_conductor_specialist_for(text), text)
+    return _delegate(_conductor_specialist_for(text), text)
 
 
 def route_specialist_message(role: str, msg: str) -> str:
@@ -288,6 +288,14 @@ def _send(text: str) -> str:
 
 def _ask(role: str, text: str) -> str:
     return f"ask-agent {role}|{biog_single_line(text)}"
+
+
+def _delegate(role: str, text: str) -> str:
+    if role == "reasoner":
+        ack = "Routing to ReasonerOC for formal evidence reasoning..."
+    else:
+        ack = "Routing to AssistantOC for BioKG lookup/curation..."
+    return _send(ack) + "\n" + _ask(role, text)
 
 
 def biog_single_line(text: str) -> str:
