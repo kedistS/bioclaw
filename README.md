@@ -81,8 +81,8 @@ skills add deterministic truth-value math on top.
 | `what protein does GENE_SYMBOL translate to?` | AssistantOC | `biokg-lookup` (multi-hop traversal) |
 | `who said SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY?` | AssistantOC | `biokg-provenance` |
 | `reconcile SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY` | ReasonerOC | `biokg-pln-evidence-merge` |
-| `is GENE_SYMBOL enhancer-regulated?` | ReasonerOC | `biokg-pln-source-aggregate` |
-| `propose adding edge: X enables Y` | AssistantOC | `biokg-stage` |
+| `is TARGET_ENTITY connected to NEIGHBOR_LABEL?` | ReasonerOC | `biokg-pln-schema-neighbor-aggregate` |
+| `propose adding edge: SOURCE_ENTITY EDGE_TYPE TARGET_ENTITY` | AssistantOC | `biokg-stage` |
 | `show staging` | Conductor only | `biokg-list-staging` |
 | `approve <hex>` / `reject <hex>` | Conductor only | `biokg-promote` / `biokg-reject` |
 
@@ -92,7 +92,7 @@ this lookup", not necessarily the entity's total number of KG edges. Displayed
 examples are chosen deterministically by code: names are cleaned and deduplicated,
 very broad ontology labels are lightly deprioritized, and concise terms are shown
 before long labels. The selector is gene-agnostic; it does not special-case any
-gene or disease.
+entity or relation.
 
 Three skills still in the backlog are exposed as safe Phase 2 limitation
 responses, not active reasoning implementations:
@@ -106,30 +106,29 @@ responses, not active reasoning implementations:
 `biokg-pln-evidence-merge SOURCE|EDGE_TYPE|TARGET`
 
 For a single edge between two specific nodes:
-1. Cypher pulls every parallel relationship of that type.
+1. The configured BioKG backend pulls every parallel relationship of that type.
 2. Each edge's `(source, evidence_code, edge_confidence)` is mapped to a
-   deterministic `stv(f, c)` via an evidence-code ladder
-   (IDA, IPI, IEA, BioClaw-promoted, etc.).
+   deterministic `stv(f, c)` via `overlay/config/reasoning.yaml`.
 3. PLN's `Truth_Revision` rule combines the per-edge stvs into one merged stv.
 4. Output is a single line, deterministic, reproducible, byte-exact.
 
 `biokg-pln-source-aggregate TARGET|EDGE_TYPE[|NEIGHBOR_LABEL]`
 
 For cross-method consensus around a target node:
-1. Cypher pulls every edge of `EDGE_TYPE` incident to `TARGET`.
+1. The configured BioKG backend pulls every edge of `EDGE_TYPE` incident to `TARGET`.
 2. If `NEIGHBOR_LABEL` is supplied, keeps only edges whose other endpoint has
    that node label.
-3. Groups edges by `r.source` (e.g. PEREGRINE, Enhancer Atlas).
+3. Groups edges by recorded source/method.
 4. Computes per-source mean confidence.
 5. PLN-revises the per-source means into one cross-method consensus stv.
 6. Reports per-source `n`, `mean`, `max` so the biocurator can sanity-check.
 
-Enhancer-regulation questions use the filtered form
-`GENE_SYMBOL|associated_with|enhancer` so non-regulatory `associated_with`
-sources are not mixed into enhancer evidence. The reasoning primitive itself is
-not enhancer-specific: explicit requests can aggregate any schema edge type with
-multiple sources, and natural relationship phrases can use
-`TARGET|NEIGHBOR_LABEL` schema-derived routing to find the connecting edge.
+Natural relationship questions use the schema-derived form
+`TARGET|NEIGHBOR_LABEL`. BioClaw resolves the target's entity label, asks the
+loaded schema which edge type connects that label to `NEIGHBOR_LABEL`, and then
+runs the same source aggregate with that edge and neighbor filter. This keeps
+the reasoning primitive relation-agnostic: any schema edge type with multiple
+sources can be aggregated without adding a Python or prompt rule.
 `biokg-schema-neighbor TARGET|NEIGHBOR_LABEL` reports the exact schema edge and
 aliases used, so KG/schema mismatches stay visible instead of being guessed over.
 
@@ -150,7 +149,7 @@ Conductor:   [STAGED edge b534b898] (source_label:SOURCE_ENTITY) -[EDGE_TYPE]-> 
              To approve, reply: approve b534b898. To reject, reply: reject b534b898.
 
 biocurator:  approve b534b898
-Conductor:   Promoted [b534b898] (edge type enables) into BioKG; provenance retained.
+Conductor:   Promoted [b534b898] (edge type EDGE_TYPE) into BioKG; provenance retained.
 ```
 
 ### Storage model
@@ -232,18 +231,17 @@ coherently on Minimax because of them.
 
 BioClaw reads its KG schema from a BioCypher-format YAML file at
 `/opt/bioclaw/config/schema.yaml`. It's the canonical biocypher-kg schema,
-restricted to the entities and edges actually loaded into Neo4j (gene, protein,
-transcript, pathway, GO terms, molecular_function, biological_process, disease,
-enhancer, plus their edge types).
+restricted to the entities and edges actually loaded into the configured BioKG
+backend.
 
 ### What the loader extracts
 
-- **Nodes** (`represented_as: node`): the `input_label` becomes the Neo4j
+- **Nodes** (`represented_as: node`): the `input_label` becomes the backend
   label; the property annotated `biolink: name` becomes the lookup property.
   Inheritance via `is_a` + `inherit_properties: true` is followed — that's how
   GO terms and disease pick up `term_name` from `ontology term`.
 - **Edges** (`represented_as: edge`): `output_label` (or `input_label`)
-  becomes the Neo4j relationship type. `source` and `target` (entity name or
+  becomes the backend relationship type. `source` and `target` (entity name or
   list) become the allowed endpoint types for `biokg-stage` validation.
 
 ### Customizing
@@ -258,13 +256,34 @@ BIOCLAW_SCHEMA_FILE=/path/inside/container/schema.yaml
 BIOCLAW_NAME_PROPERTIES=gene_name,protein_name,term_name,id
 ```
 
+## Reasoning config
+
+PLN/STV reasoning policy is configured in
+`overlay/config/reasoning.yaml`, mounted at
+`/opt/bioclaw/config/reasoning.yaml`. The default file is intentionally neutral
+and defines:
+
+- `default_stv` and `action_threshold`
+- empty optional maps for deployment-calibrated evidence-code priors
+- empty optional maps for deployment-calibrated source priors
+- empty optional maps for deployment-calibrated source score normalizers
+- configurable edge annotation names to inspect for per-edge confidence/score
+
+By default, BioClaw uses numeric per-edge confidence annotations in `[0, 1]`
+when the KG provides them; otherwise it falls back to neutral `default_stv`.
+Raw score annotations are only used after a deployment supplies a
+`score_normalization` rule for that source, because score scales are not
+universally comparable. Large BioKG deployments can mount a separate calibrated
+reasoning file if they have validated reliability priors. Those priors are
+deployment data, not schema relationships and not Python routing logic.
+
 ### Schema validation
 
 When `biokg-stage SRC|EDGE|TGT|...` is called, the schema enforces:
 
 1. `EDGE` exists in the schema.
-2. The Neo4j label of `SRC` is in the edge's allowed `source` list.
-3. The Neo4j label of `TGT` is in the edge's allowed `target` list.
+2. The backend label of `SRC` is in the edge's allowed `source` list.
+3. The backend label of `TGT` is in the edge's allowed `target` list.
 
 Violations return `error: schema validation failed: ...` instead of silently
 creating a malformed proposal.
@@ -278,9 +297,14 @@ biokg-schema
 Prints all entity labels with their name property, plus all edge types with
 their allowed source/target labels.
 
-## Neo4j connection — switching instances
+## BioKG backend
 
-All connection details live in `.env`:
+BioClaw currently talks to the configured MORK/MeTTa BioKG backend for the
+containerized demo. Cypher is not used in the active MORK path; structural
+queries are expressed through schema-aware MeTTa patterns.
+
+If you switch to a Neo4j backend in another deployment, connection details live
+in `.env`:
 
 ```bash
 NEO4J_URI=bolt+s://your-host:7687
