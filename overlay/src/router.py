@@ -610,19 +610,22 @@ def _normalize_edge_type(edge: str) -> str:
 
 
 def _normalize_neighbor_label(neighbor: str) -> str:
-    text = re.sub(r"\s+", " ", str(neighbor or "").replace("_", " ").strip())
+    text = _strip_query_context(str(neighbor or "").replace("_", " "))
     try:
         import biokg
         resolved = biokg.schema_resolve_neighbor_label(text)
         if resolved:
             return resolved
+        resolved = _schema_label_from_phrase_tokens(biokg.schema_intent_options(), text)
+        if resolved:
+            return resolved
     except Exception:
         pass
-    return _schema_token_local(text)
+    return ""
 
 
 def _normalize_entity_phrase(entity: str) -> str:
-    text = re.sub(r"\s+", " ", str(entity).strip().strip('"').strip("'")).strip()
+    text = _strip_query_context(str(entity).strip().strip('"').strip("'"))
     labels = []
     try:
         import biokg
@@ -653,6 +656,42 @@ def _normalize_edge_target(edge: str, target: str) -> str:
 
 def _schema_token_local(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+
+
+def _strip_query_context(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = re.sub(r"\b(?:in|from|within)\s+(?:this\s+)?(?:kg|biokg|knowledge\s+graph)$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bbiologically$", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _schema_label_from_phrase_tokens(options: dict, phrase: str) -> str:
+    phrase_tokens = _loose_tokens(phrase)
+    if not phrase_tokens:
+        return ""
+    candidates = []
+    for item in options.get("entities") or []:
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        names = [label, str(item.get("schema_name") or "")]
+        for name in names:
+            tokens = _loose_tokens(name.replace("_", " "))
+            if tokens and tokens.issubset(phrase_tokens):
+                candidates.append((len(tokens), len(name), label))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    return candidates[0][2]
+
+
+def _loose_tokens(value: str) -> set:
+    tokens = set()
+    for token in re.findall(r"[a-z0-9]+", str(value or "").lower()):
+        if len(token) <= 1:
+            continue
+        tokens.add(token[:-1] if token.endswith("s") and len(token) > 3 else token)
+    return tokens
 
 
 def _source_aggregate_request(text: str):
