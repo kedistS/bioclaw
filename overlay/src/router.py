@@ -168,6 +168,12 @@ def _execute_llm_specialist_intent(role: str, text: str) -> str:
         return ""
     call, raw, interpret = executed
     if _should_repair_tool_result(raw):
+        grounded = _grounded_repair(role, text, intent)
+        if grounded:
+            g_call, g_raw, g_interpret = grounded
+            if not _should_repair_tool_result(g_raw):
+                call, raw, interpret = g_call, g_raw, g_interpret
+                return _specialist_send(role, call, text, raw, interpret=interpret)
         repaired = _llm_specialist_intent(role, text, previous_intent=intent, previous_result=raw)
         if repaired:
             repaired_executed = _run_specialist_intent(role, text, repaired)
@@ -176,6 +182,38 @@ def _execute_llm_specialist_intent(role: str, text: str) -> str:
                 if not _should_prefer_original_result(raw, r_raw):
                     call, raw, interpret = r_call, r_raw, r_interpret
     return _specialist_send(role, call, text, raw, interpret=interpret)
+
+
+def _grounded_repair(role: str, text: str, intent: dict):
+    """Schema/KG-backed fallback after an LLM-selected tool returns no support."""
+    try:
+        import biokg
+    except Exception:
+        return None
+    tool = str((intent or {}).get("tool", "")).strip()
+    if role == "assistant":
+        entity = _normalize_entity_phrase(intent.get("entity", ""))
+        if entity and tool in {"lookup", "schema_neighbor_lookup", "functional_summary"}:
+            call = f"biokg.functional_summary({entity})"
+            return call, biokg.functional_summary(entity), True
+        return None
+
+    if role != "reasoner":
+        return None
+    entity = _normalize_entity_phrase(intent.get("entity", ""))
+    if not entity:
+        entity = _normalize_entity_phrase(intent.get("source", ""))
+    if not entity:
+        return None
+    if tool in {"schema_neighbor_aggregate", "source_aggregate"}:
+        candidates = _candidate_neighbor_labels(text, intent)
+        for neighbor in candidates:
+            payload = "|".join([entity, neighbor])
+            call = f"biokg.pln_schema_neighbor_aggregate_pipe({payload})"
+            raw = biokg.pln_schema_neighbor_aggregate_pipe(payload)
+            if not _should_repair_tool_result(raw):
+                return call, raw, True
+    return None
 
 
 def _run_specialist_intent(role: str, text: str, intent: dict):
@@ -374,6 +412,8 @@ def _should_repair_tool_result(raw: str) -> bool:
         "no connections in biokg",
         "no connections currently recorded",
         "did not return support",
+        "did not return any",
+        "did not find support",
         "i did not find biokg edge",
         "i did not find any biokg",
     )
@@ -683,6 +723,40 @@ def _schema_label_from_phrase_tokens(options: dict, phrase: str) -> str:
         return ""
     candidates.sort(key=lambda row: (-row[0], -row[1], row[2]))
     return candidates[0][2]
+
+
+def _candidate_neighbor_labels(text: str, intent: dict) -> list:
+    try:
+        import biokg
+        options = biokg.schema_intent_options()
+    except Exception:
+        return []
+    phrases = [
+        str((intent or {}).get("neighbor", "")),
+        str(text or ""),
+    ]
+    labels = []
+    for phrase in phrases:
+        label = _schema_label_from_phrase_tokens(options, _strip_query_context(phrase))
+        if label and label not in labels:
+            labels.append(label)
+    phrase_tokens = _loose_tokens(" ".join(phrases))
+    scored = []
+    for item in options.get("entities") or []:
+        label = str(item.get("label") or "").strip()
+        if not label or label in labels:
+            continue
+        names = [label, str(item.get("schema_name") or "")]
+        best = 0
+        for name in names:
+            tokens = _loose_tokens(name.replace("_", " "))
+            best = max(best, len(tokens & phrase_tokens))
+        if best:
+            scored.append((best, len(label), label))
+    for _, _, label in sorted(scored, key=lambda row: (-row[0], -row[1], row[2])):
+        if label not in labels:
+            labels.append(label)
+    return labels
 
 
 def _loose_tokens(value: str) -> set:
