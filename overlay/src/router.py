@@ -194,6 +194,14 @@ def _grounded_repair(role: str, text: str, intent: dict):
     if role == "assistant":
         entity = _normalize_entity_phrase(intent.get("entity", ""))
         if entity and tool in {"lookup", "schema_neighbor_lookup", "functional_summary"}:
+            if tool == "schema_neighbor_lookup":
+                candidates = _candidate_neighbor_labels(text, intent)
+                for neighbor in candidates:
+                    payload = "|".join([entity, neighbor])
+                    call = f"biokg.schema_path_lookup_pipe({payload})"
+                    raw = biokg.schema_path_lookup_pipe(payload)
+                    if not _should_repair_tool_result(raw):
+                        return call, raw, True
             call = f"biokg.functional_summary({entity})"
             return call, biokg.functional_summary(entity), True
         return None
@@ -233,6 +241,13 @@ def _run_specialist_intent(role: str, text: str, intent: dict):
                     payload = "|".join([entity, neighbor])
                     call = f"biokg.schema_neighbor_lookup_pipe({payload})"
                     return call, biokg.schema_neighbor_lookup_pipe(payload), True
+            if tool == "schema_path_lookup":
+                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                target = _normalize_neighbor_label(intent.get("target", "") or intent.get("neighbor", ""))
+                if entity and target:
+                    payload = "|".join([entity, target])
+                    call = f"biokg.schema_path_lookup_pipe({payload})"
+                    return call, biokg.schema_path_lookup_pipe(payload), True
             if tool == "lookup":
                 entity = _normalize_entity_phrase(intent.get("entity", ""))
                 if entity:
@@ -349,6 +364,7 @@ def _llm_specialist_intent(role: str, text: str,
             "Allowed tools:\n"
             "- functional_summary: broad question about what an entity is known to do, including phrases like what do we know about ENTITY biologically. Fields: entity.\n"
             "- schema_neighbor_lookup: direct annotations for a schema neighbor class. Fields: entity, neighbor.\n"
+            "- schema_path_lookup: indirect/multihop traversal through schema relationships from an entity to a target schema class. Use for questions like which protein a gene ultimately connects to when the schema may require intermediate nodes. Fields: entity, target.\n"
             "- lookup: general entity lookup. Fields: entity.\n"
             "- provenance: source/provenance for a specific edge. Fields: source, edge, target.\n"
             "- stage: user proposes adding an edge. Fields: source, edge, target, evidence.\n"
@@ -391,7 +407,7 @@ SCHEMA:
         return {}
     tool = str(data.get("tool", "")).strip()
     allowed = {
-        "assistant": {"functional_summary", "schema_neighbor_lookup", "lookup", "provenance", "stage", "none"},
+        "assistant": {"functional_summary", "schema_neighbor_lookup", "schema_path_lookup", "lookup", "provenance", "stage", "none"},
         "reasoner": {"evidence_merge", "schema_neighbor_aggregate", "source_aggregate", "none"},
     }[role]
     if tool not in allowed or tool == "none":

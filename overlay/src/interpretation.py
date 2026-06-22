@@ -52,7 +52,7 @@ def interpret(role: str, tool_call: str, user_text: str, raw_result: str) -> str
             answer = _append_once(answer, "Caveat:", "Caveat: " + " ".join(caveats))
         return answer
 
-    if tool_call.startswith("biokg.schema_neighbor_lookup_pipe"):
+    if tool_call.startswith(("biokg.schema_neighbor_lookup_pipe", "biokg.schema_path_lookup_pipe")):
         answer = raw
         if caveats:
             answer = _append_once(answer, "Caveat:", "Caveat: " + " ".join(caveats))
