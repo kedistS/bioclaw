@@ -45,6 +45,13 @@ def route_human_message(msg: str) -> str:
             "I route biology work to AssistantOC for curation and BioKG lookups, or ReasonerOC for formal evidence and confidence reasoning."
         )
 
+    clarification = _entity_clarification(text)
+    if clarification:
+        return _send(
+            f"Yes - I am treating that as the BioKG entity symbol {clarification}. "
+            "Please restate the specific relation you want checked if needed."
+        )
+
     m = re.match(r"^approve\s+([0-9a-f]{8})$", lower)
     if m:
         import biokg
@@ -80,6 +87,13 @@ def route_specialist_message(role: str, msg: str) -> str:
                 result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
             tool = f"biokg.stage_pipe({'|'.join(staged)})"
             return _specialist_send(role, tool, text, result, interpret=False)
+
+        schema_path = _schema_path_request(text)
+        if schema_path:
+            import biokg
+            payload = "|".join(schema_path)
+            tool = f"biokg.schema_path_lookup_pipe({payload})"
+            return _specialist_send(role, tool, text, biokg.schema_path_lookup_pipe(payload))
 
         llm_routed = _execute_llm_specialist_intent(role, text)
         if llm_routed:
@@ -325,6 +339,8 @@ def _conductor_specialist_for(text: str) -> str:
         return "reasoner"
     if re.search(r"\b(?:confidence|confident|cross-source|cross method|consensus|aggregate)\b", q):
         return "reasoner"
+    if _looks_like_schema_path_question(q):
+        return "assistant"
     if re.search(r"\b(?:evidence|sources?|support|confidence|confident)\b", q) and re.search(
         r"\b(?:that|this|it)\b", q
     ):
@@ -338,6 +354,7 @@ def _conductor_assistant_route_is_confident(text: str) -> bool:
     q = re.sub(r"\s+", " ", text).strip().lower().rstrip("?.!")
     return bool(
         re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q)
+        or _looks_like_schema_path_question(q)
         or q.startswith(("propose ", "propose adding edge", "stage "))
         or re.match(r"^(?:what\s+does|what\s+do\s+we\s+know\s+about|tell\s+me\s+about|what\s+is|show\s+me|summari[sz]e|can\s+you\s+summari[sz]e)\b", q)
     )
@@ -348,7 +365,7 @@ def _llm_conductor_specialist_for(text: str) -> str:
         return ""
     system = """You route BioClaw user messages to one specialist.
 Return only JSON: {"specialist":"assistant"} or {"specialist":"reasoner"}.
-AssistantOC handles entity summaries, direct annotations, BioKG lookup, provenance/source questions for a specific edge, and staging/proposals.
+AssistantOC handles entity summaries, direct annotations, schema-path questions such as protein-product or translate-through-transcript lookups, BioKG lookup, provenance/source questions for a specific edge, and staging/proposals.
 ReasonerOC handles evidence confidence, reconcile/merge, source aggregation over schema relations, and hypothesis-style reasoning.
 Do not answer the biology question."""
     user = f"User message: {text}"
@@ -573,6 +590,56 @@ def _activity_summary_entity(text: str) -> str:
 
 def _schema_neighbor_lookup_request(text: str):
     return None
+
+
+def _schema_path_request(text: str):
+    q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
+    patterns = (
+        r"^(?:does|do)\s+(?:the\s+)?(?:gene\s+)?(.+?)\s+(?:have|has)\s+(?:a\s+)?protein\s+product$",
+        r"^(.+?)\s+is\s+(?:a\s+)?gene\s+(?:does|do)\s+it\s+(?:have|has)\s+(?:a\s+)?protein\s+product$",
+        r"^(?:does|do)\s+(?:the\s+)?(?:gene\s+)?(.+?)\s+translat(?:e|es)\s+to\s+(?:a\s+)?protein$",
+        r"^to\s+which\s+protein\s+(?:does\s+)?(?:the\s+)?(?:gene\s+)?(.+?)\s+translat(?:e|es)(?:\s+to)?$",
+        r"^(?:which|what)\s+protein\s+(?:product\s+)?(?:does|do|is)\s+(?:the\s+)?(?:gene\s+)?(.+?)\s+(?:translate\s+to|connected\s+to|produce|encode)$",
+    )
+    for pattern in patterns:
+        m = re.match(pattern, q, flags=re.IGNORECASE)
+        if not m:
+            continue
+        entity = _normalize_entity_phrase(m.group(1).strip())
+        entity = _symbolish_entity(entity)
+        target = _normalize_neighbor_label("protein")
+        if entity and target:
+            return entity, target
+    return None
+
+
+def _looks_like_schema_path_question(q: str) -> bool:
+    text = str(q or "").lower()
+    return bool(
+        re.search(r"\bprotein\s+product\b", text)
+        or re.search(r"\btranslat(?:e|es|ed|ing)\s+to\s+(?:a\s+)?protein\b", text)
+        or re.search(r"\bwhich\s+protein\b", text)
+    )
+
+
+def _entity_clarification(text: str) -> str:
+    q = re.sub(r"\s+", " ", str(text or "")).strip().rstrip("?.!")
+    patterns = (
+        r"^(?:for\s+)?([A-Za-z][A-Za-z0-9_-]{1,31})\s+you\s+mean$",
+        r"^(?:you\s+mean\s+)([A-Za-z][A-Za-z0-9_-]{1,31})$",
+    )
+    for pattern in patterns:
+        m = re.match(pattern, q, flags=re.IGNORECASE)
+        if m:
+            return _symbolish_entity(m.group(1).strip())
+    return ""
+
+
+def _symbolish_entity(entity: str) -> str:
+    text = str(entity or "").strip()
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,15}", text):
+        return text.upper()
+    return text
 
 
 def _edge_question(text: str, prefixes: tuple):

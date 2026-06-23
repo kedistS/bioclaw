@@ -4117,9 +4117,9 @@ def _format_schema_path_lookup_result(source_name: str, source_label: str,
     if not path_results:
         path_text = "; ".join(_schema_path_text(path) for path in schema_paths[:3])
         return (
-            f"The schema has directed path(s) from {display} "
-            f"({_friendly_label(source_label)}) to {target_friendly}: {path_text}. "
-            "However, BioKG did not return matching path instances for this entity."
+            f"BioKG's schema can represent a path from {display} "
+            f"({_friendly_label(source_label)}) to {target_friendly} through {path_text}, "
+            "but this KG snapshot did not return matching path instances for that entity."
         )
 
     target_counts = {}
