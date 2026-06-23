@@ -1915,7 +1915,95 @@ class Neo4jBackend:
         )
 
     def schema_path_lookup(self, source_name: str, target_label: str, max_hops: int = None) -> str:
-        return "biokg Neo4j schema-path lookup is not implemented; MORK is the supported BioClaw backend."
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        source_label = self._resolve_label(source_name)
+        if not source_label:
+            return (f"error: source entity {source_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        resolved_target = _schema_label_for_phrase(self._schema, target_label)
+        if not resolved_target:
+            return f"error: target label {target_label!r} is not in the loaded BioCypher schema."
+        try:
+            env_max = int(os.environ.get("BIOKG_SCHEMA_PATH_MAX_HOPS", "3"))
+        except (TypeError, ValueError):
+            env_max = 3
+        hops = max_hops if max_hops is not None else env_max
+        try:
+            hops = int(hops)
+        except (TypeError, ValueError):
+            hops = env_max
+        hops = max(1, min(hops, 6))
+
+        paths = self._schema.directed_paths_between(source_label, resolved_target, max_hops=hops)
+        source_display = str(source_name).strip()
+        if not paths:
+            return (
+                f"I did not find a directed schema path from {source_display} "
+                f"({_friendly_label(source_label)}) to {_friendly_label(resolved_target)} "
+                f"within {hops} hop(s)."
+            )
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_PATH_LOOKUP_LIMIT", "50"))
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(limit, 1)
+
+        path_results = []
+        capped = False
+        for path in paths:
+            rows, display = self._query_schema_path(source_name, source_label, path, limit)
+            if display:
+                source_display = display
+            if rows:
+                path_results.append((path, rows))
+            if len(rows) >= limit:
+                capped = True
+                break
+
+        return _format_schema_path_lookup_result(
+            source_display, source_label, resolved_target, paths, path_results, capped=capped,
+        )
+
+    def _query_schema_path(self, source_name: str, source_label: str,
+                           path: list, limit: int) -> tuple:
+        source_match = " OR ".join(
+            f"toLower(n0.{p}) = toLower($source_name)" for p in self._name_props
+        )
+        matches = [f"MATCH (n0:`{source_label}`) WHERE {source_match} WITH n0 LIMIT 1"]
+        returns = [
+            f"coalesce({self._neo4j_name_expr('n0')}) AS n0_name"
+        ]
+        for idx, (edge, _step_source, step_target) in enumerate(path):
+            left = f"n{idx}"
+            right = f"n{idx + 1}"
+            matches.append(f"MATCH ({left})-[:`{edge}`]->({right}:`{step_target}`)")
+            returns.append(f"coalesce({self._neo4j_name_expr(right)}) AS {right}_name")
+            returns.append(f"coalesce(toString({right}.id), toString(id({right}))) AS {right}_id")
+        cypher = " ".join(matches) + " RETURN " + ", ".join(returns) + f" LIMIT {int(limit)}"
+        try:
+            with self._driver.session(database=self._database) as session:
+                records = list(session.run(cypher, source_name=str(source_name).strip()))
+        except Exception:
+            return [], ""
+
+        rows = []
+        source_display = ""
+        for record in records:
+            if not source_display:
+                source_display = record.get("n0_name") or str(source_name).strip()
+            row = []
+            for idx, (_edge, _step_source, step_target) in enumerate(path):
+                var = f"n{idx + 1}"
+                node_name = record.get(f"{var}_name") or record.get(f"{var}_id") or ""
+                node_id = record.get(f"{var}_id") or node_name
+                row.append((step_target, str(node_id), str(node_name).replace("_", " ")))
+            rows.append(row)
+        return rows, source_display
+
+    def _neo4j_name_expr(self, var_name: str) -> str:
+        props = [f"{var_name}.{p}" for p in self._name_props]
+        return ", ".join(props + [f"toString({var_name}.id)", f"toString(id({var_name}))"])
 
     def pln_source_aggregate(self, target_name: str, edge_type: str, neighbor_label: str = None) -> str:
         """Cross-source consensus for all edges of EDGE_TYPE incident to TARGET.
