@@ -95,6 +95,15 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.schema_path_lookup_pipe({payload})"
             return _specialist_send(role, tool, text, biokg.schema_path_lookup_pipe(payload))
 
+        type_lookup = _entity_type_lookup_request(text)
+        if type_lookup:
+            import biokg
+            entity, expected_type = type_lookup
+            tool = f"biokg.lookup({entity})"
+            raw = biokg.lookup(entity)
+            raw = _type_lookup_annotation(raw, entity, expected_type)
+            return _specialist_send(role, tool, text, raw)
+
         llm_routed = _execute_llm_specialist_intent(role, text)
         if llm_routed:
             return llm_routed
@@ -211,7 +220,7 @@ def _grounded_repair(role: str, text: str, intent: dict):
         return None
     tool = str((intent or {}).get("tool", "")).strip()
     if role == "assistant":
-        entity = _normalize_entity_phrase(intent.get("entity", ""))
+        entity = _normalize_entity_phrase(intent.get("entity", ""), text)
         if entity and tool in {"lookup", "schema_neighbor_lookup", "functional_summary"}:
             if tool == "schema_neighbor_lookup":
                 candidates = _candidate_neighbor_labels(text, intent)
@@ -227,9 +236,9 @@ def _grounded_repair(role: str, text: str, intent: dict):
 
     if role != "reasoner":
         return None
-    entity = _normalize_entity_phrase(intent.get("entity", ""))
+    entity = _normalize_entity_phrase(intent.get("entity", ""), text)
     if not entity:
-        entity = _normalize_entity_phrase(intent.get("source", ""))
+        entity = _normalize_entity_phrase(intent.get("source", ""), text)
     if not entity:
         return None
     if tool in {"schema_neighbor_aggregate", "source_aggregate"}:
@@ -249,37 +258,37 @@ def _run_specialist_intent(role: str, text: str, intent: dict):
         import biokg
         if role == "assistant":
             if tool == "functional_summary":
-                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                entity = _normalize_entity_phrase(intent.get("entity", ""), text)
                 if entity:
                     call = f"biokg.functional_summary({entity})"
                     return call, biokg.functional_summary(entity), True
             if tool == "schema_neighbor_lookup":
-                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                entity = _normalize_entity_phrase(intent.get("entity", ""), text)
                 neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
                 if entity and neighbor:
                     payload = "|".join([entity, neighbor])
                     call = f"biokg.schema_neighbor_lookup_pipe({payload})"
                     return call, biokg.schema_neighbor_lookup_pipe(payload), True
             if tool == "schema_path_lookup":
-                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                entity = _normalize_entity_phrase(intent.get("entity", ""), text)
                 target = _normalize_neighbor_label(intent.get("target", "") or intent.get("neighbor", ""))
                 if entity and target:
                     payload = "|".join([entity, target])
                     call = f"biokg.schema_path_lookup_pipe({payload})"
                     return call, biokg.schema_path_lookup_pipe(payload), True
             if tool == "lookup":
-                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                entity = _normalize_entity_phrase(intent.get("entity", ""), text)
                 if entity:
                     call = f"biokg.lookup({entity})"
                     return call, biokg.lookup(entity), True
             if tool == "provenance":
-                source, edge, target = _intent_edge_values(intent)
+                source, edge, target = _intent_edge_values(intent, text)
                 if source and edge and target:
                     payload = "|".join([source, edge, target])
                     call = f"biokg.provenance({payload})"
                     return call, biokg.provenance(payload), True
             if tool == "stage":
-                source, edge, target = _intent_edge_values(intent)
+                source, edge, target = _intent_edge_values(intent, text)
                 evidence = str(intent.get("evidence") or "proposed by biocurator").strip()
                 if source and edge and target:
                     result = biokg.stage_pipe("|".join([source, edge, target, evidence]))
@@ -290,20 +299,20 @@ def _run_specialist_intent(role: str, text: str, intent: dict):
                     return call, result, False
         if role == "reasoner":
             if tool == "evidence_merge":
-                source, edge, target = _intent_edge_values(intent)
+                source, edge, target = _intent_edge_values(intent, text)
                 if source and edge and target:
                     payload = "|".join([source, edge, target])
                     call = f"biokg.pln_evidence_merge_pipe({payload})"
                     return call, biokg.pln_evidence_merge_pipe(payload), True
             if tool == "schema_neighbor_aggregate":
-                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                entity = _normalize_entity_phrase(intent.get("entity", ""), text)
                 neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
                 if entity and neighbor:
                     payload = "|".join([entity, neighbor])
                     call = f"biokg.pln_schema_neighbor_aggregate_pipe({payload})"
                     return call, biokg.pln_schema_neighbor_aggregate_pipe(payload), True
             if tool == "source_aggregate":
-                entity = _normalize_entity_phrase(intent.get("entity", ""))
+                entity = _normalize_entity_phrase(intent.get("entity", ""), text)
                 edge = _normalize_edge_type(intent.get("edge", ""))
                 neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
                 if entity and edge:
@@ -339,7 +348,7 @@ def _conductor_specialist_for(text: str) -> str:
         return "reasoner"
     if re.search(r"\b(?:confidence|confident|cross-source|cross method|consensus|aggregate)\b", q):
         return "reasoner"
-    if _looks_like_schema_path_question(q):
+    if _looks_like_schema_path_question(q) or _looks_like_type_question(q):
         return "assistant"
     if re.search(r"\b(?:evidence|sources?|support|confidence|confident)\b", q) and re.search(
         r"\b(?:that|this|it)\b", q
@@ -355,6 +364,7 @@ def _conductor_assistant_route_is_confident(text: str) -> bool:
     return bool(
         re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q)
         or _looks_like_schema_path_question(q)
+        or _looks_like_type_question(q)
         or q.startswith(("propose ", "propose adding edge", "stage "))
         or re.match(r"^(?:what\s+does|what\s+do\s+we\s+know\s+about|tell\s+me\s+about|what\s+is|show\s+me|summari[sz]e|can\s+you\s+summari[sz]e)\b", q)
     )
@@ -605,8 +615,7 @@ def _schema_path_request(text: str):
         m = re.match(pattern, q, flags=re.IGNORECASE)
         if not m:
             continue
-        entity = _normalize_entity_phrase(m.group(1).strip())
-        entity = _symbolish_entity(entity)
+        entity = _normalize_entity_phrase(m.group(1).strip(), q)
         target = _normalize_neighbor_label("protein")
         if entity and target:
             return entity, target
@@ -620,6 +629,40 @@ def _looks_like_schema_path_question(q: str) -> bool:
         or re.search(r"\btranslat(?:e|es|ed|ing)\s+to\s+(?:a\s+)?protein\b", text)
         or re.search(r"\bwhich\s+protein\b", text)
     )
+
+
+def _entity_type_lookup_request(text: str):
+    q = re.sub(r"\s+", " ", str(text or "")).strip().rstrip("?.!")
+    m = re.match(r"^is\s+(?:the\s+)?(.+?)\s+(?:a|an)\s+([A-Za-z][A-Za-z0-9_\-\s]*)$", q, flags=re.IGNORECASE)
+    if not m:
+        return None
+    entity = _normalize_entity_phrase(m.group(1).strip(), q)
+    expected = _normalize_neighbor_label(m.group(2).strip())
+    if entity and expected:
+        return entity, expected
+    return None
+
+
+def _looks_like_type_question(q: str) -> bool:
+    return bool(re.match(r"^is\s+(?:the\s+)?.+?\s+(?:a|an)\s+[A-Za-z][A-Za-z0-9_\-\s]*$", str(q or "").strip(), flags=re.IGNORECASE))
+
+
+def _type_lookup_annotation(raw: str, entity: str, expected_type: str) -> str:
+    text = str(raw or "")
+    expected = _friendly_schema_label(expected_type)
+    if "No entity matching" in text:
+        return text
+    lower = text.lower()
+    if f"({expected_type.lower()})" in lower or f"is a {expected.lower()}" in lower:
+        return f"Yes. {text}"
+    return (
+        f"BioKG did not confirm that {entity} is a {expected} from the lookup result. "
+        + text
+    )
+
+
+def _friendly_schema_label(label: str) -> str:
+    return str(label or "").replace("_", " ").strip()
 
 
 def _entity_clarification(text: str) -> str:
@@ -752,7 +795,7 @@ def _normalize_neighbor_label(neighbor: str) -> str:
     return ""
 
 
-def _normalize_entity_phrase(entity: str) -> str:
+def _normalize_entity_phrase(entity: str, user_text: str = "") -> str:
     text = _strip_query_context(str(entity).strip().strip('"').strip("'"))
     labels = []
     try:
@@ -767,11 +810,41 @@ def _normalize_entity_phrase(entity: str) -> str:
     if labels:
         alternatives = "|".join(re.escape(v) for v in sorted(set(labels), key=len, reverse=True))
         text = re.sub(rf"^(?:the\s+)?(?:{alternatives})\s+", "", text, flags=re.IGNORECASE)
-    return text.strip()
+    text = text.strip()
+    normalized = _llm_normalize_entity_mention(text, user_text)
+    return normalized or text
 
 
-def _intent_edge_values(intent: dict) -> tuple:
-    source = _normalize_entity_phrase(intent.get("source", ""))
+def _llm_normalize_entity_mention(entity: str, user_text: str = "") -> str:
+    entity = str(entity or "").strip()
+    if not entity:
+        return ""
+    if not _truthy(os.environ.get("BIOCLAW_LLM_ENTITY_NORMALIZATION", "true")):
+        return ""
+    # Keep obvious non-symbol phrases deterministic. Edge targets like
+    # "zinc ion binding" should not go through this source-entity normalizer.
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,31}", entity):
+        return ""
+    system = """You normalize biological entity mentions for BioClaw routing.
+Return only JSON: {"entity":"..."}.
+Correct casing and obvious small typos in gene/protein/transcript symbols from the user's wording.
+Do not answer the biology question. Do not explain.
+If uncertain, return the original mention unchanged.
+The returned entity will still be checked against BioKG before any factual answer is given."""
+    user = f"User question: {user_text or entity}\nExtracted entity mention: {entity}"
+    data = _llm_json(system, user, max_tokens=80)
+    if not isinstance(data, dict):
+        return ""
+    candidate = str(data.get("entity", "")).strip()
+    if not candidate or len(candidate) > 64:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", candidate):
+        return ""
+    return candidate
+
+
+def _intent_edge_values(intent: dict, user_text: str = "") -> tuple:
+    source = _normalize_entity_phrase(intent.get("source", ""), user_text)
     edge = _normalize_edge_type(intent.get("edge", ""))
     target = _normalize_edge_target(edge, intent.get("target", ""))
     return source, edge, target

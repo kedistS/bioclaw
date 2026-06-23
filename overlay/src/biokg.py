@@ -556,6 +556,24 @@ def _normalize_entity_query_name(name: str) -> str:
     return text.strip()
 
 
+def _entity_name_candidates(name: str) -> list:
+    """Candidate display-name spellings to try before raw-ID fallback."""
+    text = _normalize_entity_query_name(name)
+    candidates = [text]
+    normalized = text.replace(" ", "_")
+    if normalized != text:
+        candidates.append(normalized)
+    return _dedupe_preserve_order([c for c in candidates if c])
+
+
+def _looks_like_raw_identifier(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text or " " in text:
+        return False
+    return bool(re.search(r"\d", text) or ":" in text)
+
+
+
 # ─── BioCypher schema loader ────────────────────────────────────────────────
 # Parses a BioCypher schema_config.yaml (full or curated subset) and exposes:
 #   entities[label] = { name_prop, all_labels (incl. inherited) }
@@ -2418,10 +2436,7 @@ class MorkBackend:
         try the input as-is AND with that normalization applied.
         Falls back to treating the input as a raw ID if no name match works."""
         name = _normalize_entity_query_name(name)
-        candidates = [name]
-        normalized = name.replace(" ", "_")
-        if normalized != name:
-            candidates.append(normalized)
+        candidates = _entity_name_candidates(name)
 
         for cand in candidates:
             for prop in self._name_props:
@@ -2437,11 +2452,14 @@ class MorkBackend:
                         return parsed
 
         # Fallback: maybe the user passed a raw ID like 'ENSG00000141510'.
-        labels = self._candidate_labels()
-        for label in labels:
-            hits = self._query(f"({label} {name})", "matched")
-            if any(h == "matched" for h in hits):
-                return label, name
+        # Do not treat arbitrary short words as raw IDs; otherwise typos can
+        # look like real disconnected nodes.
+        if _looks_like_raw_identifier(name):
+            labels = self._candidate_labels()
+            for label in labels:
+                hits = self._query(f"({label} {name})", "matched")
+                if any(h == "matched" for h in hits):
+                    return label, name
 
         return None
 
