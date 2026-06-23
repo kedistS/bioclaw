@@ -163,6 +163,8 @@ def _llm_rewrite_grounded(role: str, tool_call: str, user_text: str, raw: str, d
         return deterministic
     if _looks_ungrounded(answer):
         return deterministic
+    if _contradicts_positive_grounding(answer, raw):
+        return deterministic
     return _preserve_critical_tokens(answer, raw, deterministic)
 
 
@@ -212,6 +214,31 @@ def _looks_ungrounded(answer: str) -> bool:
         "as an ai",
     )
     return any(phrase in lower for phrase in banned)
+
+
+def _contradicts_positive_grounding(answer: str, raw: str) -> bool:
+    raw_lower = str(raw or "").lower()
+    answer_lower = str(answer or "").lower()
+    positive_markers = (
+        "biokg shows",
+        "biokg returned",
+        "biokg found",
+        "direct annotation",
+        "schema-path instance",
+    )
+    absence_markers = (
+        "did not return support",
+        "no support",
+        "no `",
+        "no '",
+        "no matching",
+        "no edges",
+        "not find",
+        "not found",
+    )
+    return any(marker in raw_lower for marker in positive_markers) and any(
+        marker in answer_lower for marker in absence_markers
+    )
 
 
 def _preserve_critical_tokens(answer: str, raw: str, fallback: str = "") -> str:

@@ -9,6 +9,8 @@ import re
 import json
 import time
 
+_LAST_ROUTED_CONTEXT = {"question": "", "role": ""}
+
 
 def route_direct(msgnew, msg, lastresults="") -> str:
     """Return an OmegaClaw command string, or "" to let the LLM handle it."""
@@ -62,10 +64,13 @@ def route_human_message(msg: str) -> str:
         import biokg
         return _send(biog_single_line(biokg.list_staging()))
 
-    role = _conductor_specialist_for(text)
+    routed_text = _with_followup_context(text)
+    role = _LAST_ROUTED_CONTEXT.get("role") if _looks_like_followup(text) and _LAST_ROUTED_CONTEXT.get("role") else ""
+    role = role or _conductor_specialist_for(routed_text)
     if role == "assistant" and not _conductor_assistant_route_is_confident(text):
-        role = _llm_conductor_specialist_for(text) or role
-    return _delegate(role, text)
+        role = _llm_conductor_specialist_for(routed_text) or role
+    _remember_routed_context(text, role)
+    return _delegate(role, routed_text)
 
 
 def route_specialist_message(role: str, msg: str) -> str:
@@ -100,6 +105,12 @@ def route_specialist_message(role: str, msg: str) -> str:
             raw = _type_lookup_annotation(raw, entity, expected_type)
             return _specialist_send(role, tool, text, raw)
 
+        entity = _activity_summary_entity(text)
+        if entity:
+            import biokg
+            tool = f"biokg.functional_summary({entity})"
+            return _specialist_send(role, tool, text, biokg.functional_summary(entity))
+
         schema_plan = _llm_schema_neighbor_plan(role, text)
         if schema_plan:
             import biokg
@@ -111,12 +122,6 @@ def route_specialist_message(role: str, msg: str) -> str:
         llm_routed = _execute_llm_specialist_intent(role, text)
         if llm_routed:
             return llm_routed
-
-        entity = _activity_summary_entity(text)
-        if entity:
-            import biokg
-            tool = f"biokg.functional_summary({entity})"
-            return _specialist_send(role, tool, text, biokg.functional_summary(entity))
 
         schema_lookup = _schema_neighbor_lookup_request(text)
         if schema_lookup:
@@ -384,6 +389,35 @@ def _conductor_assistant_route_is_confident(text: str) -> bool:
         or q.startswith(("propose ", "propose adding edge", "stage "))
         or re.match(r"^(?:what\s+does|what\s+do\s+we\s+know\s+about|tell\s+me\s+about|what\s+is|show\s+me|summari[sz]e|can\s+you\s+summari[sz]e)\b", q)
     )
+
+
+def _with_followup_context(text: str) -> str:
+    if not _looks_like_followup(text):
+        return text
+    previous = _LAST_ROUTED_CONTEXT.get("question", "")
+    if not previous:
+        return text
+    return f"Follow-up to previous BioClaw question: {previous}. User follow-up: {text}"
+
+
+def _looks_like_followup(text: str) -> bool:
+    q = re.sub(r"\s+", " ", str(text or "").strip().lower()).rstrip("?.!")
+    if not q:
+        return False
+    if re.search(r"\b(?:it|that|this|those|relationship|relation|edge|answer|previous|follow\s*up)\b", q):
+        return True
+    if re.match(r"^(?:no|yes|right|wrong|actually|but|also|and)\b", q):
+        return True
+    return False
+
+
+def _remember_routed_context(text: str, role: str) -> None:
+    global _LAST_ROUTED_CONTEXT
+    if _looks_like_followup(text):
+        return
+    if role not in {"assistant", "reasoner"}:
+        return
+    _LAST_ROUTED_CONTEXT = {"question": biog_single_line(text), "role": role}
 
 
 def _llm_conductor_specialist_for(text: str) -> str:
