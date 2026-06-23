@@ -148,6 +148,14 @@ def route_specialist_message(role: str, msg: str) -> str:
         if llm_routed:
             return llm_routed
 
+        schema_plan = _llm_schema_neighbor_plan(role, text)
+        if schema_plan:
+            import biokg
+            entity, neighbor = schema_plan
+            payload = "|".join([entity, neighbor])
+            tool = f"biokg.pln_schema_neighbor_aggregate_pipe({payload})"
+            return _specialist_send(role, tool, text, biokg.pln_schema_neighbor_aggregate_pipe(payload))
+
         edge = _edge_question(
             text,
             prefixes=(
@@ -237,7 +245,7 @@ def _grounded_repair(role: str, text: str, intent: dict):
         entity = _normalize_entity_phrase(intent.get("source", ""), text)
     if not entity:
         return None
-    if tool in {"schema_neighbor_aggregate", "source_aggregate"}:
+    if tool in {"evidence_merge", "schema_neighbor_aggregate", "source_aggregate"}:
         candidates = _candidate_neighbor_labels(text, intent)
         for neighbor in candidates:
             payload = "|".join([entity, neighbor])
@@ -460,8 +468,8 @@ def _llm_specialist_intent(role: str, text: str,
     elif role == "reasoner":
         tools = (
             "Allowed tools:\n"
-            "- evidence_merge: confidence/reconcile/merge evidence for a specific edge, including shortened target terms if the KG can resolve them. Fields: source, edge, target.\n"
-            "- schema_neighbor_aggregate: aggregate evidence for an entity through a schema neighbor class. Fields: entity, neighbor.\n"
+            "- evidence_merge: confidence/reconcile/merge evidence for a specific concrete edge when the user gives source entity, edge type, and target entity. Fields: source, edge, target.\n"
+            "- schema_neighbor_aggregate: aggregate evidence for an entity through a schema neighbor class. Use this for broad evidence/source/support questions about relation classes such as disease association, enhancer regulation, biological process, molecular function, cellular component, pathway, transcript, or protein. Fields: entity, neighbor.\n"
             "- source_aggregate: aggregate evidence by explicit edge type, optionally through a neighbor class. Fields: entity, edge, optional neighbor.\n"
         )
     else:
@@ -474,8 +482,9 @@ Use only the schema labels and edge aliases listed below.
 For neighbor, return one schema entity label or schema entity name from SCHEMA.
 For edge, return one schema edge label or alias from SCHEMA.
 If the user names a source entity and a target concept but omits the edge word,
-choose an edge only when SCHEMA has a source->target-label contract that fits
-the concept's entity type; otherwise return {{"tool":"none"}}.
+prefer a schema-neighbor tool using the target concept's schema entity label.
+Choose an edge only when the user explicitly names an edge type or asks for a
+specific source-edge-target claim.
 If no allowed tool fits, return {{"tool":"none"}}.
 SCHEMA:
 {_schema_prompt_inventory()}
@@ -502,6 +511,26 @@ SCHEMA:
         return {}
     data["tool"] = tool
     return data
+
+
+def _llm_schema_neighbor_plan(role: str, text: str):
+    if role != "reasoner" or not _llm_routing_enabled():
+        return None
+    system = f"""You map natural-language BioClaw evidence questions to a schema-neighbor aggregate.
+Return only compact JSON: {{"entity":"...", "neighbor":"..."}} or {{"entity":"","neighbor":""}}.
+Use this when the user asks whether an entity has evidence, support, sources, association, annotation, regulation, or confidence involving a schema entity class.
+The neighbor must be one schema entity label or schema entity name from SCHEMA.
+Do not choose edge types here. Do not answer the biology question.
+SCHEMA:
+{_schema_prompt_inventory()}"""
+    data = _llm_json(system, f"User message: {text}", max_tokens=120)
+    if not isinstance(data, dict):
+        return None
+    entity = _normalize_entity_phrase(data.get("entity", ""), text)
+    neighbor = _normalize_neighbor_label(data.get("neighbor", ""))
+    if entity and neighbor:
+        return entity, neighbor
+    return None
 
 
 def _should_repair_tool_result(raw: str) -> bool:
@@ -993,10 +1022,6 @@ def _loose_tokens(value: str) -> set:
 
 def _source_aggregate_request(text: str):
     q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
-    natural = _natural_schema_aggregate_request(q)
-    if natural:
-        return natural
-
     m = re.match(
         r"^(?:source[-\s]?aggregate|aggregate sources|aggregate evidence|cross-method confidence|consensus)"
         r"\s+(?:for|on)\s+(.+?)\s+(?:via|using)\s+([A-Za-z_][A-Za-z0-9_]*)"
@@ -1025,39 +1050,6 @@ def _source_aggregate_request(text: str):
         return "edge", values
 
     return None
-
-
-def _natural_schema_aggregate_request(q: str):
-    patterns = (
-        (r"^(?:what|which)\s+evidence\s+sources?\s+support\s+(.+?)\s+(.+?)\s+association$", "entity-neighbor"),
-        (r"^(?:what|which)\s+sources?\s+support\s+(.+?)\s+(.+?)\s+association$", "entity-neighbor"),
-        (r"^what\s+evidence\s+supports\s+(.+?)\s+(.+?)\s+(?:association|regulation)$", "entity-neighbor"),
-        (r"^(?:do\s+we\s+have|does\s+biokg\s+have)\s+(?:any\s+)?(.+?)\s+evidence\s+for\s+(.+?)$", "neighbor-entity"),
-        (r"^(?:does|do)\s+(.+?)\s+have\s+(.+?)\s+evidence$", "entity-neighbor"),
-    )
-    for pattern, order in patterns:
-        m = re.match(pattern, q, flags=re.IGNORECASE)
-        if not m:
-            continue
-        left, right = (m.group(1).strip(), m.group(2).strip())
-        if order == "neighbor-entity":
-            neighbor_text, entity_text = left, right
-        else:
-            entity_text, neighbor_text = left, right
-        entity = _normalize_entity_phrase(entity_text, q)
-        neighbor = _normalize_neighbor_label(_relation_phrase_to_neighbor(neighbor_text))
-        if entity and neighbor:
-            return "schema-neighbor", [entity, neighbor]
-    return None
-
-
-def _relation_phrase_to_neighbor(text: str) -> str:
-    phrase = _strip_query_context(str(text or "").replace("-", " "))
-    phrase = re.sub(r"\b(?:gene|kg|biokg|evidence|source|sources|association|associated|regulated|regulation)\b", " ", phrase, flags=re.IGNORECASE)
-    phrase = re.sub(r"\s+", " ", phrase).strip()
-    if phrase.lower() in {"enhancer", "enhancers"}:
-        return "enhancer"
-    return phrase
 
 
 def _stage_request(text: str):
