@@ -104,6 +104,14 @@ def route_specialist_message(role: str, msg: str) -> str:
         if llm_routed:
             return llm_routed
 
+        schema_plan = _llm_schema_neighbor_plan(role, text)
+        if schema_plan:
+            import biokg
+            entity, neighbor = schema_plan
+            payload = "|".join([entity, neighbor])
+            tool = f"biokg.schema_neighbor_lookup_pipe({payload})"
+            return _specialist_send(role, tool, text, biokg.schema_neighbor_lookup_pipe(payload))
+
         entity = _activity_summary_entity(text)
         if entity:
             import biokg
@@ -514,11 +522,18 @@ SCHEMA:
 
 
 def _llm_schema_neighbor_plan(role: str, text: str):
-    if role != "reasoner" or not _llm_routing_enabled():
+    if role not in {"assistant", "reasoner"} or not _llm_routing_enabled():
         return None
-    system = f"""You map natural-language BioClaw evidence questions to a schema-neighbor aggregate.
+    action = "lookup direct BioKG annotations" if role == "assistant" else "aggregate evidence and confidence"
+    use_case = (
+        "Use this when the user asks for one annotation class, location class, function class, process class, pathway class, transcript class, or protein class for an entity."
+        if role == "assistant"
+        else "Use this when the user asks whether an entity has evidence, support, sources, association, annotation, regulation, or confidence involving a schema entity class."
+    )
+    system = f"""You map natural-language BioClaw questions to a schema-neighbor plan.
 Return only compact JSON: {{"entity":"...", "neighbor":"..."}} or {{"entity":"","neighbor":""}}.
-Use this when the user asks whether an entity has evidence, support, sources, association, annotation, regulation, or confidence involving a schema entity class.
+The specialist will use this plan to {action}.
+{use_case}
 The neighbor must be one schema entity label or schema entity name from SCHEMA.
 Do not choose edge types here. Do not answer the biology question.
 SCHEMA:
