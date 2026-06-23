@@ -7,6 +7,7 @@ calls inside their own containers.
 import os
 import re
 import json
+import time
 
 
 def route_direct(msgnew, msg, lastresults="") -> str:
@@ -35,15 +36,10 @@ def route_human_message(msg: str) -> str:
     lower = text.lower().strip().rstrip(".")
 
     if lower in {"hi", "hello", "hey", "menu"}:
-        return _send(
-            "Hi. I orchestrate two specialists: AssistantOC handles BioKG lookups, provenance, explanations, and proposals; "
-            "ReasonerOC handles evidence merging, cross-source confidence, and hypothesis-style reasoning."
-        )
+        return _send(_llm_conductor_smalltalk(text, "greeting") or _default_conductor_greeting())
 
     if lower in {"what can you do", "list specialists", "help"}:
-        return _send(
-            "I route biology work to AssistantOC for curation and BioKG lookups, or ReasonerOC for formal evidence and confidence reasoning."
-        )
+        return _send(_llm_conductor_smalltalk(text, "help") or _default_conductor_help())
 
     clarification = _entity_clarification(text)
     if clarification:
@@ -386,6 +382,62 @@ Do not answer the biology question."""
     return ""
 
 
+def _llm_conductor_smalltalk(text: str, kind: str) -> str:
+    if not _truthy(os.environ.get("BIOCLAW_LLM_GREETING", "true")):
+        return ""
+    if not _llm_routing_enabled():
+        return ""
+    if kind == "help":
+        instruction = (
+            "Write one short IRC-ready help reply, maximum 45 words. "
+            "Say that BioClaw routes curation/lookups/provenance/proposals to AssistantOC "
+            "and evidence/confidence reasoning to ReasonerOC. Be natural, not scripted."
+        )
+    else:
+        instruction = (
+            "Write one short IRC-ready greeting, maximum 35 words. "
+            "Mention BioClaw and the two specialists naturally: AssistantOC for BioKG/curation, "
+            "ReasonerOC for evidence/confidence reasoning. Vary wording from typical canned bot greetings."
+        )
+    system = f"""You write only lightweight Conductor messages for BioClaw.
+Return only JSON: {{"reply":"..."}}.
+{instruction}
+Do not answer biology questions. Do not include markdown. Do not invent capabilities beyond the named specialists."""
+    user = f"User message: {text}\nVariation seed: {time.time_ns()}"
+    data = _llm_json(system, user, max_tokens=100, temperature=0.7)
+    reply = _clean_smalltalk_reply(data.get("reply", "") if isinstance(data, dict) else "")
+    return reply
+
+
+def _clean_smalltalk_reply(reply: str) -> str:
+    text = re.sub(r"\s+", " ", str(reply or "")).strip()
+    if not text:
+        return ""
+    if any(ch in text for ch in "\r\n"):
+        return ""
+    lower = text.lower()
+    required = ("assistantoc" in lower) and ("reasoneroc" in lower)
+    if not required:
+        return ""
+    if len(text.split()) > 55:
+        return ""
+    return text
+
+
+def _default_conductor_greeting() -> str:
+    return (
+        "Hi. BioClaw can route BioKG lookup and curation work to AssistantOC, "
+        "or evidence and confidence reasoning to ReasonerOC."
+    )
+
+
+def _default_conductor_help() -> str:
+    return (
+        "BioClaw routes lookups, provenance, explanations, and proposals to AssistantOC, "
+        "and evidence merges, source aggregation, and confidence reasoning to ReasonerOC."
+    )
+
+
 def _llm_specialist_intent(role: str, text: str,
                            previous_intent: dict = None,
                            previous_result: str = "") -> dict:
@@ -519,7 +571,7 @@ def _schema_prompt_inventory() -> str:
     return "entities: " + ent_text + "\nedges:\n" + "\n".join(edge_lines)
 
 
-def _llm_json(system: str, user: str, max_tokens: int = 160) -> dict:
+def _llm_json(system: str, user: str, max_tokens: int = 160, **kwargs) -> dict:
     provider = (
         os.environ.get("BIOCLAW_ROUTER_PROVIDER")
         or os.environ.get("BIOCLAW_INTERPRETER_PROVIDER")
@@ -529,7 +581,13 @@ def _llm_json(system: str, user: str, max_tokens: int = 160) -> dict:
     ).strip()
     try:
         import lib_llm_ext
-        raw = lib_llm_ext.callProvider(provider, system + ":-:-:-:" + user, max_tokens=max_tokens, reasoning="low")
+        raw = lib_llm_ext.callProvider(
+            provider,
+            system + ":-:-:-:" + user,
+            max_tokens=max_tokens,
+            reasoning="low",
+            **kwargs,
+        )
     except Exception as exc:
         print(f"[BIOCLAW_ROUTER] LLM routing failed: {exc}", flush=True)
         return {}

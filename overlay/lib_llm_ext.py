@@ -294,12 +294,12 @@ _register_provider_instance(TestProvider())
 _register_provider_instance(OpenAIProvider(name="OpenAI", var_name="OPENAI_API_KEY", model_name="gpt-5.4", base_url="https://api.openai.com/v1"))
 
 
-def callProvider(provider_name: str, content: str, max_tokens: int = 6000, reasoning: str = "medium") -> str:
+def callProvider(provider_name: str, content: str, max_tokens: int = 6000, reasoning: str = "medium", **kwargs) -> str:
     """Generic dispatcher for MeTTa."""
     provider = _get_provider(provider_name)
     if not provider or not provider.is_available:
         raise RuntimeError(f"Provider '{provider_name}' not available")
-    return provider.chat(content=content, max_tokens=max_tokens, reasoning=reasoning)
+    return provider.chat(content=content, max_tokens=max_tokens, reasoning=reasoning, **kwargs)
 
 
 
