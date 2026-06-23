@@ -122,6 +122,8 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.provenance({payload})"
             return _specialist_send(role, tool, text, biokg.provenance(payload))
 
+        return _unsupported_specialist_send(role, text)
+
     if role == "reasoner":
         llm_routed = _execute_llm_specialist_intent(role, text)
         if llm_routed:
@@ -156,7 +158,9 @@ def route_specialist_message(role: str, msg: str) -> str:
             tool = f"biokg.pln_source_aggregate_pipe({payload})"
             return _specialist_send(role, tool, text, biokg.pln_source_aggregate_pipe(payload))
 
-    return ""
+        return _unsupported_specialist_send(role, text)
+
+    return _unsupported_specialist_send(role, text)
 
 
 def _execute_llm_specialist_intent(role: str, text: str) -> str:
@@ -174,13 +178,14 @@ def _execute_llm_specialist_intent(role: str, text: str) -> str:
             if not _should_repair_tool_result(g_raw):
                 call, raw, interpret = g_call, g_raw, g_interpret
                 return _specialist_send(role, call, text, raw, interpret=interpret)
-        repaired = _llm_specialist_intent(role, text, previous_intent=intent, previous_result=raw)
-        if repaired:
-            repaired_executed = _run_specialist_intent(role, text, repaired)
-            if repaired_executed and not _same_intent(intent, repaired):
-                r_call, r_raw, r_interpret = repaired_executed
-                if not _should_prefer_original_result(raw, r_raw):
-                    call, raw, interpret = r_call, r_raw, r_interpret
+        if _truthy(os.environ.get("BIOCLAW_LLM_REPAIR_ON_EMPTY", "false")):
+            repaired = _llm_specialist_intent(role, text, previous_intent=intent, previous_result=raw)
+            if repaired:
+                repaired_executed = _run_specialist_intent(role, text, repaired)
+                if repaired_executed and not _same_intent(intent, repaired):
+                    r_call, r_raw, r_interpret = repaired_executed
+                    if not _should_prefer_original_result(raw, r_raw):
+                        call, raw, interpret = r_call, r_raw, r_interpret
     return _specialist_send(role, call, text, raw, interpret=interpret)
 
 
@@ -870,6 +875,32 @@ def _specialist_send(role: str, tool_call: str, user_text: str, raw_result: str,
         print(f"[BIOCLAW_ROUTER] interpretation failed: {exc}", flush=True)
         text = raw_result
     return _send(text)
+
+
+def _unsupported_specialist_send(role: str, text: str) -> str:
+    if role == "reasoner":
+        message = (
+            "I could not map that question to a grounded BioKG/PLN reasoning tool. "
+            "Try naming the entity and relation class, for example: "
+            "`aggregate evidence for IMPACT via associated_with through enhancer`, "
+            "`is IMPACT enhancer-regulated?`, or "
+            "`reconcile BRCA1 enables zinc ion binding`."
+        )
+    else:
+        candidates = _candidate_neighbor_labels(text, {})[:3]
+        if candidates:
+            hint = " Schema classes I can try from this wording include: " + ", ".join(candidates) + "."
+        else:
+            hint = ""
+        message = (
+            "I could not map that question to a grounded BioKG lookup, provenance, proposal, "
+            "or schema-path tool. Try naming the entity and target class, for example: "
+            "`what do we know about IMPACT biologically?`, "
+            "`which protein is IMPACT connected to?`, or "
+            "`source of BRCA1 enables zinc ion binding`."
+            + hint
+        )
+    return _specialist_send(role, "bioclaw.unsupported", text, message, interpret=False)
 
 
 def _ask(role: str, text: str) -> str:
