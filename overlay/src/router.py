@@ -100,10 +100,6 @@ def route_specialist_message(role: str, msg: str) -> str:
             raw = _type_lookup_annotation(raw, entity, expected_type)
             return _specialist_send(role, tool, text, raw)
 
-        llm_routed = _execute_llm_specialist_intent(role, text)
-        if llm_routed:
-            return llm_routed
-
         schema_plan = _llm_schema_neighbor_plan(role, text)
         if schema_plan:
             import biokg
@@ -111,6 +107,10 @@ def route_specialist_message(role: str, msg: str) -> str:
             payload = "|".join([entity, neighbor])
             tool = f"biokg.schema_neighbor_lookup_pipe({payload})"
             return _specialist_send(role, tool, text, biokg.schema_neighbor_lookup_pipe(payload))
+
+        llm_routed = _execute_llm_specialist_intent(role, text)
+        if llm_routed:
+            return llm_routed
 
         entity = _activity_summary_entity(text)
         if entity:
