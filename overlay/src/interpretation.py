@@ -163,7 +163,7 @@ def _llm_rewrite_grounded(role: str, tool_call: str, user_text: str, raw: str, d
         return deterministic
     if _looks_ungrounded(answer):
         return deterministic
-    return _preserve_critical_tokens(answer, raw)
+    return _preserve_critical_tokens(answer, raw, deterministic)
 
 
 def _grounded_rewrite_prompt(role: str, tool_call: str, user_text: str, raw: str, deterministic: str) -> str:
@@ -214,13 +214,15 @@ def _looks_ungrounded(answer: str) -> bool:
     return any(phrase in lower for phrase in banned)
 
 
-def _preserve_critical_tokens(answer: str, raw: str) -> str:
+def _preserve_critical_tokens(answer: str, raw: str, fallback: str = "") -> str:
     missing = []
     for token in _critical_tokens(raw):
         if token not in answer:
             missing.append(token)
     if not missing:
         return answer
+    if any(not re.match(r"^stv\s+[0-9.]+/[0-9.]+$", token, flags=re.IGNORECASE) for token in missing):
+        return _single_line(fallback or raw)
     return _append_once(answer, "Grounded details:", "Grounded details: " + "; ".join(missing))
 
 

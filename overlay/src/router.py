@@ -344,6 +344,10 @@ def _conductor_specialist_for(text: str) -> str:
         return "reasoner"
     if re.search(r"\b(?:confidence|confident|cross-source|cross method|consensus|aggregate)\b", q):
         return "reasoner"
+    if re.search(r"\b(?:evidence|sources?|support)\b", q) and re.search(
+        r"\b(?:association|associated|regulated|regulation|disease|enhancer|function|process|component|pathway)\b", q
+    ):
+        return "reasoner"
     if _looks_like_schema_path_question(q) or _looks_like_type_question(q):
         return "assistant"
     if re.search(r"\b(?:evidence|sources?|support|confidence|confident)\b", q) and re.search(
@@ -989,6 +993,10 @@ def _loose_tokens(value: str) -> set:
 
 def _source_aggregate_request(text: str):
     q = re.sub(r"\s+", " ", text).strip().rstrip("?.!")
+    natural = _natural_schema_aggregate_request(q)
+    if natural:
+        return natural
+
     m = re.match(
         r"^(?:source[-\s]?aggregate|aggregate sources|aggregate evidence|cross-method confidence|consensus)"
         r"\s+(?:for|on)\s+(.+?)\s+(?:via|using)\s+([A-Za-z_][A-Za-z0-9_]*)"
@@ -1017,6 +1025,39 @@ def _source_aggregate_request(text: str):
         return "edge", values
 
     return None
+
+
+def _natural_schema_aggregate_request(q: str):
+    patterns = (
+        (r"^(?:what|which)\s+evidence\s+sources?\s+support\s+(.+?)\s+(.+?)\s+association$", "entity-neighbor"),
+        (r"^(?:what|which)\s+sources?\s+support\s+(.+?)\s+(.+?)\s+association$", "entity-neighbor"),
+        (r"^what\s+evidence\s+supports\s+(.+?)\s+(.+?)\s+(?:association|regulation)$", "entity-neighbor"),
+        (r"^(?:do\s+we\s+have|does\s+biokg\s+have)\s+(?:any\s+)?(.+?)\s+evidence\s+for\s+(.+?)$", "neighbor-entity"),
+        (r"^(?:does|do)\s+(.+?)\s+have\s+(.+?)\s+evidence$", "entity-neighbor"),
+    )
+    for pattern, order in patterns:
+        m = re.match(pattern, q, flags=re.IGNORECASE)
+        if not m:
+            continue
+        left, right = (m.group(1).strip(), m.group(2).strip())
+        if order == "neighbor-entity":
+            neighbor_text, entity_text = left, right
+        else:
+            entity_text, neighbor_text = left, right
+        entity = _normalize_entity_phrase(entity_text, q)
+        neighbor = _normalize_neighbor_label(_relation_phrase_to_neighbor(neighbor_text))
+        if entity and neighbor:
+            return "schema-neighbor", [entity, neighbor]
+    return None
+
+
+def _relation_phrase_to_neighbor(text: str) -> str:
+    phrase = _strip_query_context(str(text or "").replace("-", " "))
+    phrase = re.sub(r"\b(?:gene|kg|biokg|evidence|source|sources|association|associated|regulated|regulation)\b", " ", phrase, flags=re.IGNORECASE)
+    phrase = re.sub(r"\s+", " ", phrase).strip()
+    if phrase.lower() in {"enhancer", "enhancers"}:
+        return "enhancer"
+    return phrase
 
 
 def _stage_request(text: str):
