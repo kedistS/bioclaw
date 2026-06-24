@@ -66,7 +66,7 @@ def route_human_message(msg: str) -> str:
 
     routed_text = _with_followup_context(text)
     role = _LAST_ROUTED_CONTEXT.get("role") if _looks_like_followup(text) and _LAST_ROUTED_CONTEXT.get("role") else ""
-    role = role or _llm_conductor_specialist_for(routed_text) or _conductor_specialist_for(routed_text)
+    role = role or _choose_conductor_specialist(routed_text)
     _remember_routed_context(text, role)
     return _delegate(role, routed_text)
 
@@ -363,6 +363,10 @@ def _run_specialist_intent(role: str, text: str, intent: dict):
 def _conductor_specialist_for(text: str) -> str:
     """Coarse workflow routing only. Detailed biology parsing belongs to specialists."""
     q = re.sub(r"\s+", " ", text).strip().lower().rstrip("?.!")
+    if _looks_like_relation_reasoning_question(q):
+        return "reasoner"
+    if _looks_like_specific_edge_confidence(q):
+        return "reasoner"
     reasoner_starts = (
         "reconcile ",
         "merge evidence for ",
@@ -394,6 +398,36 @@ def _conductor_specialist_for(text: str) -> str:
     if re.search(r"\b(?:where|source|provenance|citation|come from|comes from)\b", q):
         return "assistant"
     return "assistant"
+
+
+def _choose_conductor_specialist(text: str) -> str:
+    llm_role = _llm_conductor_specialist_for(text)
+    fallback_role = _conductor_specialist_for(text)
+    if (
+        llm_role == "assistant"
+        and fallback_role == "reasoner"
+        and (
+            _looks_like_relation_reasoning_question(text)
+            or _looks_like_specific_edge_confidence(text)
+        )
+    ):
+        return "reasoner"
+    return llm_role or fallback_role
+
+
+def _looks_like_relation_reasoning_question(text: str) -> bool:
+    q = re.sub(r"\s+", " ", str(text or "").strip().lower()).rstrip("?.!")
+    if not q:
+        return False
+    relation_terms = (
+        "evidence", "support", "confidence", "confident", "aggregate", "consensus",
+        "reconcile", "merge", "could", "may", "might", "possible", "potential",
+        "regulated", "regulation", "control", "controlled", "association",
+        "associated", "implicated",
+    )
+    if not any(re.search(rf"\b{re.escape(term)}\b", q) for term in relation_terms):
+        return False
+    return bool(_candidate_neighbor_labels(q, {}))
 
 
 def _conductor_assistant_route_is_confident(text: str) -> bool:
@@ -441,8 +475,10 @@ def _llm_conductor_specialist_for(text: str) -> str:
         return ""
     system = """You route BioClaw user messages to one specialist.
 Return only JSON: {"specialist":"assistant"} or {"specialist":"reasoner"}.
-AssistantOC handles entity summaries, direct annotations, schema-path questions such as protein-product or translate-through-transcript lookups, BioKG lookup, provenance/source questions for a specific edge, and staging/proposals.
-ReasonerOC handles evidence confidence, reconcile/merge, source aggregation over schema relations, and hypothesis-style reasoning.
+AssistantOC handles retrieval-style work: entity summaries, direct annotation lists, schema-path questions such as protein-product or translate-through-transcript lookups, BioKG lookup, provenance/source questions for a specific concrete edge, and staging/proposals.
+ReasonerOC handles judgment-style work: evidence confidence, reconcile/merge, source aggregation over schema relations, and hypothesis-style reasoning.
+Route modal relation questions to ReasonerOC, for example questions asking whether a gene could/may/might be regulated, controlled, associated, implicated, or supported by a schema relation.
+If a question asks for evidence/support/confidence/sources for a relation class, choose ReasonerOC. If it asks to list or summarize known annotations, choose AssistantOC.
 Do not answer the biology question."""
     user = f"User message: {text}"
     data = _llm_json(system, user, max_tokens=80)
