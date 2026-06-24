@@ -66,9 +66,7 @@ def route_human_message(msg: str) -> str:
 
     routed_text = _with_followup_context(text)
     role = _LAST_ROUTED_CONTEXT.get("role") if _looks_like_followup(text) and _LAST_ROUTED_CONTEXT.get("role") else ""
-    role = role or _conductor_specialist_for(routed_text)
-    if role == "assistant" and not _conductor_assistant_route_is_confident(text):
-        role = _llm_conductor_specialist_for(routed_text) or role
+    role = role or _llm_conductor_specialist_for(routed_text) or _conductor_specialist_for(routed_text)
     _remember_routed_context(text, role)
     return _delegate(role, routed_text)
 
@@ -88,6 +86,10 @@ def route_specialist_message(role: str, msg: str) -> str:
                 result += f" To approve, reply: approve {sid}. To reject, reply: reject {sid}."
             tool = f"biokg.stage_pipe({'|'.join(staged)})"
             return _specialist_send(role, tool, text, result, interpret=False)
+
+        llm_routed = _execute_llm_specialist_intent(role, text)
+        if llm_routed:
+            return llm_routed
 
         schema_path = _schema_path_request(text)
         if schema_path:
@@ -118,10 +120,6 @@ def route_specialist_message(role: str, msg: str) -> str:
             payload = "|".join([entity, neighbor])
             tool = f"biokg.schema_neighbor_lookup_pipe({payload})"
             return _specialist_send(role, tool, text, biokg.schema_neighbor_lookup_pipe(payload))
-
-        llm_routed = _execute_llm_specialist_intent(role, text)
-        if llm_routed:
-            return llm_routed
 
         schema_lookup = _schema_neighbor_lookup_request(text)
         if schema_lookup:
@@ -284,6 +282,14 @@ def _run_specialist_intent(role: str, text: str, intent: dict):
     try:
         import biokg
         if role == "assistant":
+            if tool == "export_schema_neighbor":
+                entity = _normalize_entity_phrase(intent.get("entity", ""), text)
+                neighbor = _normalize_neighbor_label(intent.get("neighbor", ""))
+                fmt = _normalize_export_format(intent.get("format", ""))
+                if entity and neighbor:
+                    payload = "|".join([entity, neighbor, fmt])
+                    call = f"biokg.export_schema_neighbor_pipe({payload})"
+                    return call, biokg.export_schema_neighbor_pipe(payload), False
             if tool == "functional_summary":
                 entity = _normalize_entity_phrase(intent.get("entity", ""), text)
                 if entity:
@@ -513,6 +519,7 @@ def _llm_specialist_intent(role: str, text: str,
             "- functional_summary: broad question about what an entity is known to do, including phrases like what do we know about ENTITY biologically. Fields: entity.\n"
             "- schema_neighbor_lookup: direct annotations for a schema neighbor class. Fields: entity, neighbor.\n"
             "- schema_path_lookup: indirect/multihop traversal through schema relationships from an entity to a target schema class. Use for questions like which protein a gene ultimately connects to when the schema may require intermediate nodes. Fields: entity, target.\n"
+            "- export_schema_neighbor: materialize the full direct annotation list for an entity and schema neighbor class to a pipeline file. Use for export/download/save/full-list/as csv/as tsv/as json requests. Fields: entity, neighbor, optional format.\n"
             "- lookup: general entity lookup. Fields: entity.\n"
             "- provenance: source/provenance for a specific edge. Fields: source, edge, target.\n"
             "- stage: user proposes adding an edge. Fields: source, edge, target, evidence.\n"
@@ -557,7 +564,7 @@ SCHEMA:
         return {}
     tool = str(data.get("tool", "")).strip()
     allowed = {
-        "assistant": {"functional_summary", "schema_neighbor_lookup", "schema_path_lookup", "lookup", "provenance", "stage", "none"},
+        "assistant": {"functional_summary", "schema_neighbor_lookup", "schema_path_lookup", "export_schema_neighbor", "lookup", "provenance", "stage", "none"},
         "reasoner": {"evidence_merge", "schema_neighbor_aggregate", "source_aggregate", "none"},
     }[role]
     if tool not in allowed or tool == "none":
@@ -1036,6 +1043,13 @@ def _intent_edge_values(intent: dict, user_text: str = "") -> tuple:
 def _normalize_edge_target(edge: str, target: str) -> str:
     text = _normalize_entity_phrase(str(target or "").replace("-", " "))
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_export_format(fmt: str) -> str:
+    value = str(fmt or "").strip().lower().lstrip(".")
+    if value in {"csv", "tsv", "json"}:
+        return value
+    return "csv"
 
 
 def _schema_token_local(value: str) -> str:

@@ -89,6 +89,8 @@
     "  Returns the resolved node labels, schema edge, and accepted aliases."
     "- Schema-derived direct annotation summary: biokg-schema-neighbor-lookup TARGET_NAME|NEIGHBOR_LABEL"
     "  Lists compact examples for direct edges between TARGET_NAME and that neighboring node type."
+    "- Export full schema-neighbor rows to CSV, TSV, or JSON: biokg-export-schema-neighbor TARGET_NAME|NEIGHBOR_LABEL[|FORMAT]"
+    "  Materializes grounded BioKG rows for downstream analysis without treating chat memory as a data source."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -161,6 +163,9 @@
 
 (= (biokg-schema-neighbor-lookup $combined)
    (py-call (biokg.schema_neighbor_lookup_pipe $combined)))
+
+(= (biokg-export-schema-neighbor $combined)
+   (py-call (biokg.export_schema_neighbor_pipe $combined)))
 
 (= (biokg-schema-path-lookup $combined)
    (py-call (biokg.schema_path_lookup_pipe $combined)))

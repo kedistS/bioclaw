@@ -24,6 +24,8 @@ from "truth"). Reject = delete the edge. Same KG, no schema split.
 """
 import os
 import re
+import csv
+import json
 import subprocess
 import tempfile
 import threading
@@ -477,6 +479,18 @@ def schema_neighbor_lookup_pipe(combined: str) -> str:
                 "Example: biokg-schema-neighbor-lookup TARGET_ENTITY|NEIGHBOR_LABEL")
     target, neighbor_label = parts
     return _get_backend().schema_neighbor_lookup(target, neighbor_label)
+
+
+def export_schema_neighbor_pipe(combined: str) -> str:
+    """Export full schema-neighbor rows. Format: TARGET_NAME|NEIGHBOR_LABEL[|csv|tsv|json]"""
+    s = str(combined).strip().strip('"').strip("'").strip()
+    parts = [p.strip() for p in s.split("|")]
+    if len(parts) not in (2, 3) or not all(parts[:2]):
+        return ("error: biokg-export-schema-neighbor format is TARGET_NAME|NEIGHBOR_LABEL[|FORMAT].\n"
+                "Example: biokg-export-schema-neighbor TP53|biological_process|csv")
+    target, neighbor_label = parts[0], parts[1]
+    fmt = parts[2] if len(parts) == 3 else "csv"
+    return _get_backend().export_schema_neighbor(target, neighbor_label, fmt)
 
 
 def schema_path_lookup_pipe(combined: str) -> str:
@@ -1160,6 +1174,9 @@ class DisabledBackend:
 
     def schema_neighbor_lookup(self, target_name: str, neighbor_label: str) -> str:
         return f"biokg unavailable ({self._reason}); cannot summarize schema-neighbor annotations"
+
+    def export_schema_neighbor(self, target_name: str, neighbor_label: str, fmt: str = "csv") -> str:
+        return f"biokg unavailable ({self._reason}); cannot export schema-neighbor annotations"
 
     def schema_path_lookup(self, source_name: str, target_label: str, max_hops: int = None) -> str:
         return f"biokg unavailable ({self._reason}); cannot summarize schema paths"
@@ -1931,6 +1948,52 @@ class Neo4jBackend:
             display, target_label, resolved_neighbor, edges, examples, edge_counts, aliases,
             capped=(len(rows) >= max(limit, 1)),
         )
+
+    def export_schema_neighbor(self, target_name: str, neighbor_label: str, fmt: str = "csv") -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_label = self._resolve_label(target_name)
+        if not target_label:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        resolved_neighbor, edges, _aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        edge_types = "|".join(f"`{edge}`" for edge in edges)
+        neighbor_name_prop = self._schema.entity_name_prop(resolved_neighbor) or "id"
+        target_name_prop = self._schema.entity_name_prop(target_label) or "id"
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_NEIGHBOR_EXPORT_LIMIT", "100000"))
+        except (TypeError, ValueError):
+            limit = 100000
+        cypher = (
+            f"MATCH (t:`{target_label}`) WHERE toLower(t.{target_name_prop}) = toLower($target) "
+            f"MATCH (t)-[r:{edge_types}]-(n:`{resolved_neighbor}`) "
+            f"RETURN coalesce(t.{target_name_prop}, $target) AS target_name, "
+            f"       type(r) AS edge, labels(n)[0] AS neighbor_label, "
+            f"       coalesce(n.id, '') AS neighbor_id, "
+            f"       coalesce(n.{neighbor_name_prop}, n.id) AS neighbor_name "
+            f"LIMIT {max(limit, 1)}"
+        )
+        try:
+            with self._driver.session(database=self._database) as session:
+                rows = list(session.run(cypher, target=str(target_name).strip()))
+        except Exception as exc:
+            return f"biokg neo4j error: {exc}"
+        export_rows = []
+        for row in rows:
+            export_rows.append({
+                "target_name": row.get("target_name") or str(target_name).strip(),
+                "target_label": target_label,
+                "edge": row.get("edge") or "",
+                "neighbor_label": row.get("neighbor_label") or resolved_neighbor,
+                "neighbor_id": row.get("neighbor_id") or "",
+                "neighbor_name": row.get("neighbor_name") or "",
+            })
+        display = export_rows[0]["target_name"] if export_rows else str(target_name).strip()
+        return _write_schema_neighbor_export(display, target_label, resolved_neighbor, export_rows, fmt)
 
     def schema_path_lookup(self, source_name: str, target_label: str, max_hops: int = None) -> str:
         if self._schema is None:
@@ -3632,6 +3695,80 @@ class MorkBackend:
             capped=capped,
         )
 
+    def export_schema_neighbor(self, target_name: str, neighbor_label: str, fmt: str = "csv") -> str:
+        if self._schema is None:
+            return "error: no BioCypher schema loaded."
+        target_entity = self._resolve_name(target_name)
+        if not target_entity:
+            return (f"error: target entity {target_name!r} not found in BioKG "
+                    f"(tried properties: {', '.join(self._name_props)}).")
+        target_label, target_id = target_entity
+        target_display = (self._resolve_id_to_name(target_label, target_id) or target_name).replace("_", " ")
+        resolved_neighbor, edges, _aliases, error = _schema_neighbor_contract(
+            self._schema, target_label, neighbor_label,
+        )
+        if error:
+            return error
+        try:
+            limit = int(os.environ.get("BIOKG_SCHEMA_NEIGHBOR_EXPORT_LIMIT", "100000"))
+        except (TypeError, ValueError):
+            limit = 100000
+        limit = max(limit, 1)
+
+        import uuid
+        rows = []
+        capped = False
+        seen = set()
+        for edge in edges:
+            for direction, pattern in (
+                ("in", f"({edge} ($o_label $o_id) ({target_label} {target_id}))"),
+                ("out", f"({edge} ({target_label} {target_id}) ($o_label $o_id))"),
+            ):
+                tag = f"bioclaw_schema_export_{direction}_{uuid.uuid4().hex[:12]}"
+                raw = self._transform(
+                    patterns=[pattern],
+                    template=f"({tag} $o_label $o_id)",
+                )
+                for line in raw:
+                    s = line.strip()
+                    if not (s.startswith("(") and s.endswith(")")):
+                        continue
+                    inner = s[1:-1].strip()
+                    if not inner.startswith(tag):
+                        continue
+                    parts = inner[len(tag):].strip().split()
+                    if len(parts) < 2:
+                        continue
+                    o_label, o_id = parts[0], " ".join(parts[1:])
+                    if o_label != resolved_neighbor:
+                        continue
+                    key = (edge, o_label, o_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append({
+                        "target_name": target_display,
+                        "target_label": target_label,
+                        "edge": edge,
+                        "neighbor_label": o_label,
+                        "neighbor_id": o_id,
+                        "neighbor_name": (self._resolve_id_to_name(o_label, o_id) or o_id).replace("_", " "),
+                    })
+                    if len(rows) >= limit:
+                        capped = True
+                        break
+                if capped:
+                    break
+            if capped:
+                break
+
+        result = _write_schema_neighbor_export(
+            target_display, target_label, resolved_neighbor, rows, fmt,
+        )
+        if capped:
+            result += f" (limited by BIOKG_SCHEMA_NEIGHBOR_EXPORT_LIMIT={limit})"
+        return result
+
     def schema_path_lookup(self, source_name: str, target_label: str, max_hops: int = None) -> str:
         if self._schema is None:
             return "error: no BioCypher schema loaded."
@@ -4124,6 +4261,57 @@ def _format_schema_neighbor_lookup_result(target_name: str, target_label: str,
         f"BioKG shows {total}{cap_note} direct annotation(s){count_note}; "
         f"examples include {_human_join(shown)}."
     )
+
+
+def _write_schema_neighbor_export(target_name: str, target_label: str,
+                                  neighbor_label: str, rows: list,
+                                  fmt: str = "csv") -> str:
+    fmt = str(fmt or "csv").strip().lower().lstrip(".")
+    if fmt not in {"csv", "tsv", "json"}:
+        fmt = "csv"
+    out_dir = os.environ.get("BIOCLAW_EXPORT_DIR", "/tmp/bioclaw_exports")
+    os.makedirs(out_dir, exist_ok=True)
+    stem = "_".join(
+        part for part in (
+            "bioclaw",
+            _safe_file_token(target_name),
+            _safe_file_token(neighbor_label),
+            time.strftime("%Y%m%d_%H%M%S", time.gmtime()),
+            uuid.uuid4().hex[:8],
+        )
+        if part
+    )
+    path = os.path.join(out_dir, f"{stem}.{fmt}")
+    fields = [
+        "target_name",
+        "target_label",
+        "edge",
+        "neighbor_label",
+        "neighbor_id",
+        "neighbor_name",
+    ]
+    normalized_rows = []
+    for row in rows:
+        normalized_rows.append({field: str(row.get(field, "")) for field in fields})
+    if fmt == "json":
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(normalized_rows, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+    else:
+        delimiter = "\t" if fmt == "tsv" else ","
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields, delimiter=delimiter)
+            writer.writeheader()
+            writer.writerows(normalized_rows)
+    return (
+        f"Exported {len(normalized_rows)} {_friendly_label(neighbor_label)} row(s) for "
+        f"{_clean_display_name(target_name)} ({_friendly_label(target_label)}) to {path}"
+    )
+
+
+def _safe_file_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    return token.strip("._-")[:80] or "export"
 
 
 def _format_schema_path_lookup_result(source_name: str, source_label: str,
