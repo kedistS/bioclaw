@@ -157,6 +157,16 @@ def route_specialist_message(role: str, msg: str) -> str:
         return _unsupported_specialist_send(role, text)
 
     if role == "reasoner":
+        specific_edge = _llm_specific_edge_confidence_plan(text)
+        if specific_edge:
+            import biokg
+            source, edge, target = specific_edge
+            payload = "|".join([source, edge, target])
+            tool = f"biokg.pln_evidence_merge_pipe({payload})"
+            raw = biokg.pln_evidence_merge_pipe(payload)
+            if not _should_repair_tool_result(raw):
+                return _specialist_send(role, tool, text, raw)
+
         llm_routed = _execute_llm_specialist_intent(role, text)
         if llm_routed:
             return llm_routed
@@ -523,10 +533,11 @@ Use entity symbols as written, but remove type words like "gene" before the symb
 Use only the schema labels and edge aliases listed below.
 For neighbor, return one schema entity label or schema entity name from SCHEMA.
 For edge, return one schema edge label or alias from SCHEMA.
-If the user names a source entity and a target concept but omits the edge word,
-prefer a schema-neighbor tool using the target concept's schema entity label.
-Choose an edge only when the user explicitly names an edge type or asks for a
-specific source-edge-target claim.
+If the user asks for confidence/support about a concrete target concept, choose
+evidence_merge when SCHEMA has a source-to-target-class edge contract. For
+example, a gene plus a molecular-function target term should use the gene to
+molecular_function edge from SCHEMA. Use schema_neighbor_aggregate for broad
+relation-class questions where no specific target node is named.
 If no allowed tool fits, return {{"tool":"none"}}.
 SCHEMA:
 {_schema_prompt_inventory()}
@@ -580,6 +591,38 @@ SCHEMA:
     if entity and neighbor:
         return entity, neighbor
     return None
+
+
+def _llm_specific_edge_confidence_plan(text: str):
+    if not _llm_routing_enabled() or not _looks_like_specific_edge_confidence(text):
+        return None
+    system = f"""You map BioClaw confidence/support questions to one specific edge claim.
+Return only compact JSON: {{"source":"...", "edge":"...", "target":"..."}} or {{"source":"","edge":"","target":""}}.
+Use this only when the user asks how strong/confident the support is for a concrete source-to-target claim.
+The edge must be one schema edge label or edge alias from SCHEMA.
+If the user names a target concept such as a binding/function/process/disease term but omits the edge, infer the edge only from the schema source-target contract.
+Do not map broad relation-class questions such as "disease association evidence for TP53" here; those are schema-neighbor aggregate questions.
+Do not answer the biology question.
+SCHEMA:
+{_schema_prompt_inventory()}"""
+    data = _llm_json(system, f"User message: {text}", max_tokens=140)
+    if not isinstance(data, dict):
+        return None
+    source = _normalize_entity_phrase(data.get("source", ""), text)
+    edge = _normalize_edge_type(data.get("edge", ""))
+    target = _normalize_edge_target(edge, data.get("target", ""))
+    if source and edge and target:
+        return source, edge, target
+    return None
+
+
+def _looks_like_specific_edge_confidence(text: str) -> bool:
+    q = re.sub(r"\s+", " ", str(text or "").strip().lower()).rstrip("?.!")
+    if not re.search(r"\b(?:how\s+strong|how\s+confident|confidence|support)\b", q):
+        return False
+    if re.search(r"\b(?:sources?|aggregate|disease\s+association|enhancer[-\s]?gene\s+association)\b", q):
+        return False
+    return True
 
 
 def _should_repair_tool_result(raw: str) -> bool:
