@@ -256,14 +256,16 @@ def cmd_schema_path(args: argparse.Namespace) -> int:
     for schema_path in paths:
         entry: dict[str, Any] = {"schema_path": schema_path.to_dict()}
         if client is not None:
-            instances = client.path_instances(
+            trace = client.path_trace(
                 schema_path=schema_path,
                 registry=registry,
                 start=start,
                 limit=args.instances_per_path,
             )
-            entry["instance_count"] = len(instances)
-            entry["instances"] = [instance.to_dict() for instance in instances]
+            entry["instance_count"] = len(trace["instances"])
+            entry["instances"] = trace["instances"]
+            if args.diagnose or not trace["instances"]:
+                entry["trace"] = trace
         path_entries.append(entry)
 
     data = {
@@ -293,6 +295,21 @@ def cmd_schema_path(args: argparse.Namespace) -> int:
         print(f"   MORK instances returned: {entry['instance_count']}")
         for instance in entry["instances"][: args.instances_per_path]:
             print(f"   - {instance['path']}")
+        if "trace" in entry:
+            trace = entry["trace"]
+            print(f"   Start atom exists: {trace['start_atom_exists']} ({trace['start']['atom']})")
+            if not trace["start_label_matches_schema"]:
+                print(f"   Start label does not match schema path labels: {', '.join(trace['node_labels'])}")
+            for step in trace["steps"]:
+                print(
+                    f"   Step {step['step']} {step['edge_label']}: "
+                    f"{step['input_paths']} input path(s) -> {step['output_paths']} output path(s)"
+                )
+                if step["example_targets"]:
+                    examples = ", ".join(f"{item['label']}:{item['id']}" for item in step["example_targets"])
+                    print(f"     Example targets: {examples}")
+            if trace["blocked_at_step"] is not None:
+                print(f"   Blocked at step: {trace['blocked_at_step']}")
     return 0
 
 
@@ -386,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     schema_path.add_argument("--mork", help="optional MORK base URL for path instance retrieval")
     schema_path.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
     schema_path.add_argument("--instances-per-path", type=int, default=20, help="maximum MORK instances per schema path")
+    schema_path.add_argument("--diagnose", action="store_true", help="show start atom and per-step MORK traversal counts")
     schema_path.add_argument("--timeout", type=int, default=30)
     schema_path.add_argument("--format", choices=["text", "json"], default="text", help="output format")
     schema_path.set_defaults(func=cmd_schema_path)

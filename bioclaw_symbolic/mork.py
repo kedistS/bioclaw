@@ -233,31 +233,76 @@ class MorkClient:
         start: EntityRef,
         limit: int = 20,
     ) -> list[PathInstance]:
+        trace = self.path_trace(schema_path, registry, start, limit)
+        instances: list[PathInstance] = []
+        for item in trace.get("instances", []):
+            nodes = tuple(EntityRef(node["label"], node["id"]) for node in item.get("nodes", []))
+            instances.append(PathInstance(schema_path=schema_path, nodes=nodes))
+        return instances
+
+    def path_trace(
+        self,
+        schema_path: SchemaPath,
+        registry: SchemaRegistry,
+        start: EntityRef,
+        limit: int = 20,
+    ) -> dict[str, Any]:
         node_types = schema_path.node_types
         node_labels = [registry.node_label_for_type(node_type) or node_type.replace(" ", "_") for node_type in node_types]
+        trace: dict[str, Any] = {
+            "schema_path": schema_path.to_dict(),
+            "start": {"label": start.label, "id": start.identifier, "atom": start.atom()},
+            "node_labels": node_labels,
+            "start_label_matches_schema": node_labels[0] == start.label,
+            "start_atom_exists": self.atom_exists(start.atom()),
+            "steps": [],
+            "instances": [],
+            "blocked_at_step": None,
+        }
         if node_labels[0] != start.label:
-            return []
+            trace["blocked_at_step"] = 0
+            return trace
 
         partials: list[tuple[EntityRef, ...]] = [(start,)]
         for index, step in enumerate(schema_path.steps):
             next_label = node_labels[index + 1]
             expanded: list[tuple[EntityRef, ...]] = []
             tag = f"bioclaw_path_step_{index + 1}"
+            step_trace: dict[str, Any] = {
+                "step": index + 1,
+                "edge_label": step.edge_label,
+                "source_type": step.source_type,
+                "target_type": step.target_type,
+                "target_label": next_label,
+                "input_paths": len(partials),
+                "output_paths": 0,
+                "example_targets": [],
+            }
             for partial in partials:
                 current = partial[-1]
                 pattern = f"({step.edge_label} {current.atom()} ({next_label} $next_id))"
                 rows = self.export(self._wrap(pattern), f"({tag} $next_id)")
                 for values in self._parse_path_rows(rows, tag, 1):
-                    expanded.append(partial + (EntityRef(next_label, values[0]),))
+                    next_entity = EntityRef(next_label, values[0])
+                    expanded.append(partial + (next_entity,))
+                    if len(step_trace["example_targets"]) < 5:
+                        step_trace["example_targets"].append({"label": next_entity.label, "id": next_entity.identifier})
                     if len(expanded) >= limit:
                         break
                 if len(expanded) >= limit:
                     break
+            step_trace["output_paths"] = len(expanded)
+            trace["steps"].append(step_trace)
             partials = expanded
             if not partials:
+                trace["blocked_at_step"] = index + 1
                 break
 
-        return [
-            PathInstance(schema_path=schema_path, nodes=partial)
+        trace["instances"] = [
+            {
+                "nodes": [{"label": node.label, "id": node.identifier} for node in partial],
+                "path": " -> ".join(f"{node.label}:{node.identifier}" for node in partial),
+            }
             for partial in partials[:limit]
         ]
+        return trace

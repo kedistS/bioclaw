@@ -313,7 +313,8 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli schema-path \
   --entity gene:ENSG00000154059 \
   --target-type protein \
   --max-depth 3 \
-  --instances-per-path 20
+  --instances-per-path 20 \
+  --diagnose
 ```
 
 This command is schema-driven: it discovers possible edge chains from the
@@ -321,6 +322,9 @@ schema's source and target node types, then retrieves matching MORK atoms
 step-by-step. A schema path with no returned MORK instances means the schema
 can represent that traversal, but this Atomspace snapshot did not return
 matching data for the chosen start entity within the requested limits.
+`--diagnose` prints the start atom existence check and per-step traversal
+counts, which helps distinguish a missing start atom from a missing intermediate
+edge.
 
 Current pagination status: this is bounded retrieval plus export. Native MORK
 cursor pagination is not used yet, so `--max-total` is still a safety cap and
