@@ -217,6 +217,15 @@ class SchemaRegistry:
                 return node
         return None
 
+    def node_label_for_type(self, node_type: str) -> str | None:
+        wanted = " ".join(str(node_type).replace("_", " ").lower().split())
+        for node in self.nodes:
+            if " ".join(node.name.replace("_", " ").lower().split()) == wanted:
+                return node.label
+            if " ".join(node.label.replace("_", " ").lower().split()) == wanted:
+                return node.label
+        return None
+
     def summary(self) -> dict[str, Any]:
         return {
             "node_types": len(self.nodes),

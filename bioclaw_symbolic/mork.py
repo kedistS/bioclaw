@@ -7,6 +7,7 @@ from typing import Any
 
 from .evidence import EntityRef, EvidencePacket, NeighborhoodPacket, edge_atom
 from .schema import SchemaRegistry
+from .schema_path import PathInstance, SchemaPath
 
 
 @dataclass
@@ -211,3 +212,52 @@ class MorkClient:
             limit=limit,
             truncated=truncated,
         )
+
+    @staticmethod
+    def _parse_path_rows(rows: list[str], tag: str, expected_values: int) -> list[list[str]]:
+        parsed: list[list[str]] = []
+        prefix = f"({tag}"
+        for row in rows:
+            if not (row.startswith(prefix) and row.endswith(")")):
+                continue
+            body = row[len(prefix) : -1].strip()
+            values = body.split()
+            if len(values) == expected_values:
+                parsed.append(values)
+        return parsed
+
+    def path_instances(
+        self,
+        schema_path: SchemaPath,
+        registry: SchemaRegistry,
+        start: EntityRef,
+        limit: int = 20,
+    ) -> list[PathInstance]:
+        node_types = schema_path.node_types
+        node_labels = [registry.node_label_for_type(node_type) or node_type.replace(" ", "_") for node_type in node_types]
+        if node_labels[0] != start.label:
+            return []
+
+        partials: list[tuple[EntityRef, ...]] = [(start,)]
+        for index, step in enumerate(schema_path.steps):
+            next_label = node_labels[index + 1]
+            expanded: list[tuple[EntityRef, ...]] = []
+            tag = f"bioclaw_path_step_{index + 1}"
+            for partial in partials:
+                current = partial[-1]
+                pattern = f"({step.edge_label} {current.atom()} ({next_label} $next_id))"
+                rows = self.export(self._wrap(pattern), f"({tag} $next_id)")
+                for values in self._parse_path_rows(rows, tag, 1):
+                    expanded.append(partial + (EntityRef(next_label, values[0]),))
+                    if len(expanded) >= limit:
+                        break
+                if len(expanded) >= limit:
+                    break
+            partials = expanded
+            if not partials:
+                break
+
+        return [
+            PathInstance(schema_path=schema_path, nodes=partial)
+            for partial in partials[:limit]
+        ]

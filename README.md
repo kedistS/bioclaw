@@ -282,6 +282,46 @@ sources, score/confidence values, evidence annotations, references, context,
 and labels. The same command supports `--format markdown` for notes and
 `--format json` for downstream analysis.
 
+## Trace Schema Paths
+
+Use `schema-path` when the question is not a single edge but a schema-valid
+traversal, such as gene to protein through transcript:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli schema-path \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --schema-policy config/schema_roles.yaml \
+  --entity gene:ENSG00000154059 \
+  --target-type protein \
+  --max-depth 3
+```
+
+This first reports schema-valid paths, for example:
+
+```text
+gene -[transcribes_to]-> transcript -[translates_to]-> protein
+```
+
+Add `--mork` to retrieve concrete MORK path instances for the start entity:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli schema-path \
+  --mork http://localhost:8037 \
+  --namespace annotation \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --schema-policy config/schema_roles.yaml \
+  --entity gene:ENSG00000154059 \
+  --target-type protein \
+  --max-depth 3 \
+  --instances-per-path 20
+```
+
+This command is schema-driven: it discovers possible edge chains from the
+schema's source and target node types, then retrieves matching MORK atoms
+step-by-step. A schema path with no returned MORK instances means the schema
+can represent that traversal, but this Atomspace snapshot did not return
+matching data for the chosen start entity within the requested limits.
+
 Current pagination status: this is bounded retrieval plus export. Native MORK
 cursor pagination is not used yet, so `--max-total` is still a safety cap and
 `truncated=true` means the result is partial. For full-scale analysis, increase

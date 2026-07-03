@@ -13,6 +13,7 @@ from .mork import MorkClient
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import render_report, report_dict
 from .schema import SchemaRegistry
+from .schema_path import find_schema_paths
 
 DEFAULT_SCHEMA_POLICY = "config/schema_roles.yaml"
 
@@ -239,6 +240,62 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_schema_path(args: argparse.Namespace) -> int:
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    start = EntityRef.parse(args.entity)
+    start_type = args.start_type or start.label
+    paths = find_schema_paths(
+        registry,
+        start_type=start_type,
+        target_type=args.target_type,
+        max_depth=args.max_depth,
+        max_paths=args.max_paths,
+    )
+    path_entries: list[dict[str, Any]] = []
+    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout) if args.mork else None
+    for schema_path in paths:
+        entry: dict[str, Any] = {"schema_path": schema_path.to_dict()}
+        if client is not None:
+            instances = client.path_instances(
+                schema_path=schema_path,
+                registry=registry,
+                start=start,
+                limit=args.instances_per_path,
+            )
+            entry["instance_count"] = len(instances)
+            entry["instances"] = [instance.to_dict() for instance in instances]
+        path_entries.append(entry)
+
+    data = {
+        "start": {"label": start.label, "id": start.identifier, "schema_type": start_type},
+        "target_type": args.target_type,
+        "max_depth": args.max_depth,
+        "schema_path_count": len(paths),
+        "paths": path_entries,
+    }
+    if args.format == "json":
+        _print_json(data)
+        return 0
+
+    print(
+        f"BioClaw schema-path report from {start.label}:{start.identifier} "
+        f"({start_type}) to {args.target_type}"
+    )
+    print("=" * 78)
+    print(f"Found {len(paths)} schema-valid path(s) up to depth {args.max_depth}.")
+    if not args.mork:
+        print("MORK was not provided, so only schema paths are shown.")
+    for index, entry in enumerate(path_entries, start=1):
+        schema_path = entry["schema_path"]
+        print(f"\n{index}. {schema_path['signature']}")
+        if "instances" not in entry:
+            continue
+        print(f"   MORK instances returned: {entry['instance_count']}")
+        for instance in entry["instances"][: args.instances_per_path]:
+            print(f"   - {instance['path']}")
+    return 0
+
+
 def cmd_audit_properties(args: argparse.Namespace) -> int:
     client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
@@ -317,6 +374,21 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="report output format")
     report.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     report.set_defaults(func=cmd_report)
+
+    schema_path = sub.add_parser("schema-path", help="find schema-valid paths and optional MORK path instances")
+    schema_path.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    schema_path.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    schema_path.add_argument("--entity", required=True, help="start entity as label:id")
+    schema_path.add_argument("--start-type", help="schema start type; defaults to the entity label")
+    schema_path.add_argument("--target-type", required=True, help="target schema node type, e.g. protein or pathway")
+    schema_path.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
+    schema_path.add_argument("--max-paths", type=int, default=20, help="maximum schema paths to return")
+    schema_path.add_argument("--mork", help="optional MORK base URL for path instance retrieval")
+    schema_path.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
+    schema_path.add_argument("--instances-per-path", type=int, default=20, help="maximum MORK instances per schema path")
+    schema_path.add_argument("--timeout", type=int, default=30)
+    schema_path.add_argument("--format", choices=["text", "json"], default="text", help="output format")
+    schema_path.set_defaults(func=cmd_schema_path)
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
