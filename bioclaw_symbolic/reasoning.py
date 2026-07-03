@@ -27,12 +27,12 @@ def load_policy(path: str | None) -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "default_stv": [1.0, 0.5],
         "action_threshold": 0.5,
-        "confidence_annotations": ["confidence", "edge_confidence", "staging_confidence"],
-        "score_annotations": ["score", "edge_score"],
-        "source_annotations": ["source", "data_source", "knowledge_source"],
-        "evidence_annotations": ["evidence", "evidence_code", "evidence_code_name"],
-        "reference_annotations": ["reference", "references", "db_reference", "pubmed_references", "source_url"],
-        "context_annotations": ["biological_context", "interaction_context", "interaction_type", "reactome_pathway"],
+        "confidence_annotations": [],
+        "score_annotations": [],
+        "source_annotations": [],
+        "evidence_annotations": [],
+        "reference_annotations": [],
+        "context_annotations": [],
     }
     if not path:
         return defaults

@@ -39,6 +39,8 @@ class EvidencePacket:
     target: EntityRef
     exists: bool
     annotations: dict[str, list[str]] = field(default_factory=dict)
+    source_details: dict[str, Any] = field(default_factory=dict)
+    target_details: dict[str, Any] = field(default_factory=dict)
 
     @property
     def edge_atom(self) -> str:
@@ -56,12 +58,49 @@ class EvidencePacket:
             out.extend(self.annotations.get(name, []))
         return out
 
+    @staticmethod
+    def _entity_dict(entity: EntityRef, details: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {"label": entity.label, "id": entity.identifier}
+        if details:
+            properties = details.get("properties", {})
+            name_candidates = [
+                prop_data
+                for prop_data in properties.values()
+                if prop_data.get("role") == "name" and prop_data.get("values")
+            ]
+            def name_priority(prop_data: dict[str, Any]) -> int:
+                biolink = str(prop_data.get("biolink", "")).replace(" ", "").lower()
+                return 0 if biolink == "name" or biolink.endswith(":name") else 1
+
+            name_candidates.sort(key=name_priority)
+            for prop_data in name_candidates:
+                if prop_data.get("role") == "name" and prop_data.get("values"):
+                    out["name"] = prop_data["values"][0]
+                    break
+            out["properties"] = properties
+        return out
+
+    def with_node_details(
+        self,
+        source_details: dict[str, Any],
+        target_details: dict[str, Any],
+    ) -> "EvidencePacket":
+        return EvidencePacket(
+            edge_type=self.edge_type,
+            source=self.source,
+            target=self.target,
+            exists=self.exists,
+            annotations=self.annotations,
+            source_details=source_details,
+            target_details=target_details,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "edge": self.edge_atom,
             "edge_type": self.edge_type,
-            "source": {"label": self.source.label, "id": self.source.identifier},
-            "target": {"label": self.target.label, "id": self.target.identifier},
+            "source": self._entity_dict(self.source, self.source_details),
+            "target": self._entity_dict(self.target, self.target_details),
             "exists": self.exists,
             "annotations": self.annotations,
         }

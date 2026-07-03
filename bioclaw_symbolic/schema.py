@@ -4,14 +4,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .schema_policy import SchemaPolicy
 from .yaml_compat import load_yaml
 
 
-SOURCE_NAMES = {"source", "data_source", "knowledge_source", "provided_by"}
-SCORE_NAMES = {"score", "edge_score", "confidence", "edge_confidence", "p_value", "q_value"}
-EVIDENCE_NAMES = {"evidence", "evidence_code", "evidence_code_name"}
-REFERENCE_NAMES = {"reference", "references", "db_reference", "pubmed_references", "source_url"}
-CONTEXT_NAMES = {"biological_context", "interaction_context", "interaction_type", "reactome_pathway"}
+@dataclass(frozen=True)
+class PropertyCapability:
+    name: str
+    role: str
+    schema_type: Any = None
+    biolink: Any = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "role": self.role,
+            "schema_type": self.schema_type,
+            "biolink": self.biolink,
+        }
+
+
+@dataclass(frozen=True)
+class NodeCapability:
+    name: str
+    label: str
+    properties: tuple[PropertyCapability, ...]
+
+    def detail_properties(self) -> tuple[PropertyCapability, ...]:
+        return tuple(prop for prop in self.properties if prop.role != "other")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "properties": [prop.to_dict() for prop in self.properties],
+            "detail_properties": [prop.to_dict() for prop in self.detail_properties()],
+        }
 
 
 @dataclass(frozen=True)
@@ -20,32 +48,27 @@ class EdgeCapability:
     label: str
     source: Any
     target: Any
-    properties: tuple[str, ...]
-
-    @property
-    def normalized_properties(self) -> set[str]:
-        return {prop.lower() for prop in self.properties}
+    properties: tuple[PropertyCapability, ...]
 
     @property
     def has_source(self) -> bool:
-        return bool(SOURCE_NAMES.intersection(self.normalized_properties))
+        return any(prop.role == "source" for prop in self.properties)
 
     @property
     def has_score(self) -> bool:
-        props = self.normalized_properties
-        return bool(SCORE_NAMES.intersection(props)) or any(prop.endswith("_score") for prop in props)
+        return any(prop.role == "score" for prop in self.properties)
 
     @property
     def has_evidence(self) -> bool:
-        return bool(EVIDENCE_NAMES.intersection(self.normalized_properties))
+        return any(prop.role == "evidence" for prop in self.properties)
 
     @property
     def has_reference(self) -> bool:
-        return bool(REFERENCE_NAMES.intersection(self.normalized_properties))
+        return any(prop.role == "reference" for prop in self.properties)
 
     @property
     def has_context(self) -> bool:
-        return bool(CONTEXT_NAMES.intersection(self.normalized_properties))
+        return any(prop.role == "context" for prop in self.properties)
 
     def reasoning_modes(self) -> list[str]:
         modes = ["edge_presence"]
@@ -67,7 +90,7 @@ class EdgeCapability:
             "label": self.label,
             "source": self.source,
             "target": self.target,
-            "properties": list(self.properties),
+            "properties": [prop.to_dict() for prop in self.properties],
             "reasoning_modes": self.reasoning_modes(),
         }
 
@@ -75,36 +98,128 @@ class EdgeCapability:
 @dataclass
 class SchemaRegistry:
     edges: list[EdgeCapability]
+    nodes: list[NodeCapability]
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "SchemaRegistry":
+    def from_file(cls, path: str | Path, policy_path: str | Path | None = None) -> "SchemaRegistry":
         data = load_yaml(Path(path)) or {}
+        policy = SchemaPolicy.from_file(policy_path)
         edges: list[EdgeCapability] = []
+        nodes: list[NodeCapability] = []
+        resolved_node_properties: dict[str, dict[str, Any]] = {}
+        resolved_edge_properties: dict[str, dict[str, Any]] = {}
+
+        def parent_names(spec: dict[str, Any]) -> list[str]:
+            parents = spec.get("is_a") or []
+            if isinstance(parents, str):
+                return [parents]
+            if isinstance(parents, list):
+                return [parent for parent in parents if isinstance(parent, str)]
+            return []
+
+        def resolve_node_properties(name: str, stack: tuple[str, ...] = ()) -> dict[str, Any]:
+            if name in resolved_node_properties:
+                return resolved_node_properties[name]
+            if name in stack:
+                return {}
+            spec = data.get(name)
+            if not isinstance(spec, dict):
+                return {}
+            inherited: dict[str, Any] = {}
+            if spec.get("inherit_properties"):
+                for parent in parent_names(spec):
+                    inherited.update(resolve_node_properties(parent, stack + (name,)))
+            own = spec.get("properties") or {}
+            if isinstance(own, dict):
+                inherited.update(own)
+            resolved_node_properties[name] = inherited
+            return inherited
+
+        def resolve_edge_properties(name: str, stack: tuple[str, ...] = ()) -> dict[str, Any]:
+            if name in resolved_edge_properties:
+                return resolved_edge_properties[name]
+            if name in stack:
+                return {}
+            spec = data.get(name)
+            if not isinstance(spec, dict):
+                return {}
+            inherited: dict[str, Any] = {}
+            if spec.get("inherit_properties"):
+                for parent in parent_names(spec):
+                    inherited.update(resolve_edge_properties(parent, stack + (name,)))
+            own = spec.get("properties") or {}
+            if isinstance(own, dict):
+                inherited.update(own)
+            resolved_edge_properties[name] = inherited
+            return inherited
+
         for name, spec in data.items():
-            if not isinstance(spec, dict) or spec.get("represented_as") != "edge":
+            if not isinstance(spec, dict):
                 continue
-            props = spec.get("properties") or {}
-            label = spec.get("output_label") or spec.get("input_label") or name.replace(" ", "_")
-            edges.append(
-                EdgeCapability(
-                    name=name,
-                    label=label,
-                    source=spec.get("source"),
-                    target=spec.get("target"),
-                    properties=tuple(sorted(str(key) for key in props.keys())),
+            represented_as = spec.get("represented_as")
+            if represented_as == "edge":
+                props = resolve_edge_properties(name)
+                label = spec.get("output_label") or spec.get("input_label") or name.replace(" ", "_")
+                capabilities: list[PropertyCapability] = []
+                for prop_name, prop_spec in sorted(props.items()):
+                    capabilities.append(
+                        PropertyCapability(
+                            name=str(prop_name),
+                            role=policy.edge_role(str(prop_name), prop_spec),
+                            schema_type=prop_spec.get("type") if isinstance(prop_spec, dict) else None,
+                            biolink=prop_spec.get("biolink") if isinstance(prop_spec, dict) else None,
+                        )
+                    )
+                edges.append(
+                    EdgeCapability(
+                        name=name,
+                        label=label,
+                        source=spec.get("source"),
+                        target=spec.get("target"),
+                        properties=tuple(capabilities),
+                    )
                 )
-            )
-        return cls(edges=edges)
+            elif represented_as == "node":
+                props = resolve_node_properties(name)
+                label = spec.get("input_label") or name.replace(" ", "_")
+                capabilities: list[PropertyCapability] = []
+                for prop_name, prop_spec in sorted(props.items()):
+                    capabilities.append(
+                        PropertyCapability(
+                            name=str(prop_name),
+                            role=policy.node_role(str(prop_name), prop_spec),
+                            schema_type=prop_spec.get("type") if isinstance(prop_spec, dict) else None,
+                            biolink=prop_spec.get("biolink") if isinstance(prop_spec, dict) else None,
+                        )
+                    )
+                nodes.append(NodeCapability(name=name, label=label, properties=tuple(capabilities)))
+        return cls(edges=edges, nodes=nodes)
 
     def by_label(self, label: str) -> list[EdgeCapability]:
         return [edge for edge in self.edges if edge.label == label or edge.name == label]
 
+    def edge_annotation_names(self, label: str) -> list[str]:
+        names: set[str] = set()
+        for edge in self.by_label(label):
+            names.update(prop.name for prop in edge.properties)
+        return sorted(names)
+
+    def node_by_label(self, label: str) -> NodeCapability | None:
+        for node in self.nodes:
+            if node.label == label or node.name == label:
+                return node
+        return None
+
     def summary(self) -> dict[str, Any]:
         return {
+            "node_types": len(self.nodes),
             "edge_types": len(self.edges),
             "with_source": sum(edge.has_source for edge in self.edges),
             "with_score": sum(edge.has_score for edge in self.edges),
             "with_evidence": sum(edge.has_evidence for edge in self.edges),
             "with_reference": sum(edge.has_reference for edge in self.edges),
             "with_context": sum(edge.has_context for edge in self.edges),
+            "nodes_with_name": sum(any(prop.role == "name" for prop in node.properties) for node in self.nodes),
+            "nodes_with_xref": sum(any(prop.role == "xref" for prop in node.properties) for node in self.nodes),
+            "nodes_with_description": sum(any(prop.role == "description" for prop in node.properties) for node in self.nodes),
         }

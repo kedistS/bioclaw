@@ -3,31 +3,10 @@ from __future__ import annotations
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from typing import Any
 
 from .evidence import EntityRef, EvidencePacket, NeighborhoodPacket, edge_atom
-
-
-DEFAULT_ANNOTATIONS = [
-    "source",
-    "data_source",
-    "knowledge_source",
-    "score",
-    "edge_score",
-    "confidence",
-    "edge_confidence",
-    "evidence",
-    "evidence_code",
-    "evidence_code_name",
-    "db_reference",
-    "reference",
-    "references",
-    "pubmed_references",
-    "source_url",
-    "biological_context",
-    "interaction_context",
-    "interaction_type",
-    "reactome_pathway",
-]
+from .schema import SchemaRegistry
 
 
 @dataclass
@@ -66,6 +45,41 @@ class MorkClient:
                 values.append(row[len(prefix) : -1].strip())
         return values
 
+    def entity_annotation_values(self, entity: EntityRef, annotation: str) -> list[str]:
+        return self.annotation_values(entity.atom(), annotation)
+
+    def entity_details(self, entity: EntityRef, schema: SchemaRegistry) -> dict[str, Any]:
+        node = schema.node_by_label(entity.label)
+        if node is None:
+            return {}
+
+        details: dict[str, Any] = {"schema_node": node.name, "properties": {}}
+        for prop in node.detail_properties():
+            values = self.entity_annotation_values(entity, prop.name)
+            if not values:
+                continue
+            details["properties"][prop.name] = {
+                "values": values,
+                "role": prop.role,
+                "schema_type": prop.schema_type,
+                "biolink": prop.biolink,
+            }
+        if not details["properties"]:
+            return {}
+        return details
+
+    def enrich_packet_nodes(self, packet: EvidencePacket, schema: SchemaRegistry) -> EvidencePacket:
+        return packet.with_node_details(
+            source_details=self.entity_details(packet.source, schema),
+            target_details=self.entity_details(packet.target, schema),
+        )
+
+    def enrich_neighborhood_nodes(self, neighborhood: NeighborhoodPacket, schema: SchemaRegistry) -> NeighborhoodPacket:
+        return neighborhood.with_packets([
+            self.enrich_packet_nodes(packet, schema)
+            for packet in neighborhood.packets
+        ])
+
     def evidence_packet(
         self,
         edge_type: str,
@@ -76,7 +90,7 @@ class MorkClient:
         expression = edge_atom(edge_type, source.label, source.identifier, target.label, target.identifier)
         exists = self.atom_exists(expression)
         packet_annotations: dict[str, list[str]] = {}
-        for annotation in annotations or DEFAULT_ANNOTATIONS:
+        for annotation in annotations or []:
             values = self.annotation_values(expression, annotation)
             if values:
                 packet_annotations[annotation] = values

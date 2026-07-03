@@ -54,9 +54,11 @@ bioclaw/
 │   ├── evidence.py     # evidence packet data model and summaries
 │   ├── mork.py         # MORK export client and packet extraction
 │   ├── reasoning.py    # bounded symbolic evidence operations
-│   └── schema.py       # BioCypher schema capability registry
+│   ├── schema.py       # BioCypher schema capability registry
+│   └── schema_policy.py # configurable property-role policy
 ├── config/
-│   └── reasoning.yaml  # neutral default reasoning policy
+│   ├── reasoning.yaml  # neutral default reasoning policy
+│   └── schema_roles.yaml # schema property-role mapping
 ├── examples/
 │   └── ppi-edge.json   # example exact-edge request
 ├── pyproject.toml
@@ -84,6 +86,8 @@ BioClaw expects:
 
 - a reachable MORK service;
 - a BioCypher schema YAML matching the loaded data;
+- a schema role policy YAML that maps schema properties to roles such as
+  source, score, evidence, reference, context, name, xref, and description;
 - optional reasoning policy YAML.
 
 For the PPI experiment, the MORK service was loaded separately on port `8037`
@@ -94,11 +98,20 @@ BioCypher loader is usually `annotation`.
 
 ```bash
 PYTHONPATH=. python3 -m bioclaw_symbolic.cli schema \
-  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --schema-policy config/schema_roles.yaml
 ```
 
-This prints relation classes and whether the schema declares useful evidence
-properties such as source, score, evidence code, references, or context.
+This prints relation classes and whether schema properties map to useful
+evidence roles such as source, score, evidence code, references, or context.
+The mapping is not embedded in Python; it comes from `config/schema_roles.yaml`
+and can be replaced for a different MORK BioAtomspace.
+
+When a command receives `--schema`, BioClaw queries edge annotations from the
+properties declared for that edge class in the schema. If a MORK atom has an
+extra annotation that is not declared by the active schema, BioClaw treats that
+as a schema/adapter alignment issue rather than silently relying on a Python
+hardcoded property list.
 
 ## Extract An Exact Edge Evidence Packet
 
@@ -108,7 +121,9 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli edge \
   --namespace annotation \
   --source protein:P20645 \
   --edge interacts_with \
-  --target protein:P51151
+  --target protein:P51151 \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --include-node-details
 ```
 
 Expected shape for the current PPI test atomspace:
@@ -138,6 +153,8 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli edge \
   --source protein:P20645 \
   --edge interacts_with \
   --target protein:P51151 \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --include-node-details \
   --reason
 ```
 
@@ -165,6 +182,8 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
   --edge interacts_with \
   --direction both \
   --max-total 100 \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --include-node-details \
   --reason
 ```
 
@@ -188,6 +207,8 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
   --direction both \
   --max-total 1000 \
   --only-multisource \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --include-node-details \
   --reason
 ```
 
@@ -199,6 +220,8 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
   --namespace annotation \
   --entity protein:P20645 \
   --edge interacts_with \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --include-node-details \
   --include-packets \
   --reason
 ```
@@ -214,6 +237,8 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
   --direction both \
   --max-total 1000 \
   --only-multisource \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --include-node-details \
   --reason \
   --export p20645_multisource_interactions.json \
   --format json
@@ -225,6 +250,13 @@ Current pagination status: this is bounded retrieval plus export. Native MORK
 cursor pagination is not used yet, so `--max-total` is still a safety cap and
 `truncated=true` means the result is partial. For full-scale analysis, increase
 `--max-total` deliberately and export to JSONL or CSV.
+
+`--include-node-details` is schema-aware. BioClaw reads node properties from the
+loaded BioCypher schema, classifies their roles through `config/schema_roles.yaml`,
+then queries those properties from MORK. This keeps node enrichment data-driven
+instead of hardcoding protein/gene/pathway property names in the code. Use
+`--schema-policy /path/to/schema_roles.yaml` to swap the policy for another
+atomspace.
 
 ## What Was Removed From The Old System
 
