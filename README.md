@@ -256,6 +256,32 @@ annotation names plus their schema-derived roles. CSV keeps stable role-based
 columns (`sources`, `scores`, `evidence`, `references`, `context`) so downstream
 pipelines do not need to know every source-specific annotation name.
 
+## Render A Ranked Curator Report
+
+Use `report` when you want a human-readable ranked view over the same
+schema-driven neighborhood packets:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli report \
+  --mork http://localhost:8037 \
+  --namespace annotation \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --schema-policy config/schema_roles.yaml \
+  --entity protein:P20645 \
+  --edge interacts_with \
+  --direction both \
+  --max-total 1000 \
+  --only-multisource \
+  --include-node-details \
+  --top 10
+```
+
+The report ranks returned edges by symbolic confidence, then source support,
+reference support, and context support. It renders role-based evidence fields:
+sources, score/confidence values, evidence annotations, references, context,
+and labels. The same command supports `--format markdown` for notes and
+`--format json` for downstream analysis.
+
 Current pagination status: this is bounded retrieval plus export. Native MORK
 cursor pagination is not used yet, so `--max-total` is still a safety cap and
 `truncated=true` means the result is partial. For full-scale analysis, increase

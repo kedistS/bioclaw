@@ -11,6 +11,7 @@ from .audit import property_audit
 from .evidence import EntityRef
 from .mork import MorkClient
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
+from .report import render_report, report_dict
 from .schema import SchemaRegistry
 
 DEFAULT_SCHEMA_POLICY = "config/schema_roles.yaml"
@@ -206,6 +207,38 @@ def cmd_neighborhood(args: argparse.Namespace) -> int:
     return 0
 
 
+def _retrieve_neighborhood(args: argparse.Namespace) -> tuple[Any, Any]:
+    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    annotations = registry.edge_annotation_names(args.edge)
+    annotation_roles = registry.edge_annotation_roles(args.edge)
+    retrieval_limit = args.max_total if args.max_total is not None else args.limit
+    raw_neighborhood = client.neighborhood(
+        edge_type=args.edge,
+        focus=EntityRef.parse(args.entity),
+        direction=args.direction,
+        limit=retrieval_limit,
+        annotations=annotations,
+        annotation_roles=annotation_roles,
+    )
+    if args.include_node_details:
+        raw_neighborhood = client.enrich_neighborhood_nodes(raw_neighborhood, registry)
+    neighborhood = raw_neighborhood
+    if args.only_multisource:
+        neighborhood = raw_neighborhood.with_packets(raw_neighborhood.multi_source_packets())
+    return raw_neighborhood, neighborhood
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    raw_neighborhood, neighborhood = _retrieve_neighborhood(args)
+    policy = load_policy(args.reasoning)
+    if args.format == "json":
+        _print_json(report_dict(neighborhood, raw_neighborhood, policy, top=args.top))
+    else:
+        print(render_report(neighborhood, raw_neighborhood, policy, top=args.top, output_format=args.format), end="")
+    return 0
+
+
 def cmd_audit_properties(args: argparse.Namespace) -> int:
     client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
@@ -266,6 +299,24 @@ def build_parser() -> argparse.ArgumentParser:
     neighborhood.add_argument("--reason", action="store_true", help="add bounded symbolic neighborhood assessment")
     neighborhood.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     neighborhood.set_defaults(func=cmd_neighborhood)
+
+    report = sub.add_parser("report", help="render a ranked curator-facing neighborhood report")
+    report.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    report.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
+    report.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    report.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    report.add_argument("--entity", required=True, help="focus entity as label:id")
+    report.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    report.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    report.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
+    report.add_argument("--max-total", type=int, help="maximum candidate edges to retrieve/process; overrides --limit")
+    report.add_argument("--timeout", type=int, default=30)
+    report.add_argument("--include-node-details", action="store_true", help="enrich source/target nodes using schema-selected node properties")
+    report.add_argument("--only-multisource", action="store_true", help="report only edges with more than one source annotation")
+    report.add_argument("--top", type=int, default=20, help="number of ranked edges to show")
+    report.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="report output format")
+    report.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    report.set_defaults(func=cmd_report)
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
