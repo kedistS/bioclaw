@@ -7,7 +7,7 @@ from typing import Any
 
 from .evidence import EntityRef
 from .mork import MorkClient
-from .reasoning import load_policy, packet_assessment
+from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .schema import SchemaRegistry
 
 
@@ -41,6 +41,29 @@ def cmd_edge(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_neighborhood(args: argparse.Namespace) -> int:
+    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+    neighborhood = client.neighborhood(
+        edge_type=args.edge,
+        focus=EntityRef.parse(args.entity),
+        direction=args.direction,
+        limit=args.limit,
+    )
+    data: dict[str, Any] = {
+        "neighborhood": neighborhood.to_dict() if args.include_packets else {
+            key: value
+            for key, value in neighborhood.to_dict().items()
+            if key != "packets"
+        },
+        "summary": neighborhood.short_summary(),
+    }
+    if args.reason:
+        policy = load_policy(args.reasoning)
+        data["assessment"] = neighborhood_assessment(neighborhood, policy)
+    _print_json(data)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bioclaw-symbolic")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -61,6 +84,19 @@ def build_parser() -> argparse.ArgumentParser:
     edge.add_argument("--reason", action="store_true", help="add bounded symbolic assessment")
     edge.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     edge.set_defaults(func=cmd_edge)
+
+    neighborhood = sub.add_parser("neighborhood", help="extract incident edge evidence packets from MORK")
+    neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    neighborhood.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
+    neighborhood.add_argument("--entity", required=True, help="focus entity as label:id")
+    neighborhood.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    neighborhood.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    neighborhood.add_argument("--limit", type=int, default=100)
+    neighborhood.add_argument("--timeout", type=int, default=30)
+    neighborhood.add_argument("--include-packets", action="store_true", help="include every edge packet in JSON output")
+    neighborhood.add_argument("--reason", action="store_true", help="add bounded symbolic neighborhood assessment")
+    neighborhood.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    neighborhood.set_defaults(func=cmd_neighborhood)
 
     return parser
 

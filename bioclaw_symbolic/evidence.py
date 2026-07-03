@@ -80,3 +80,52 @@ class EvidencePacket:
         if refs:
             parts.append(f"References/context ids: {', '.join(refs[:8])}.")
         return " ".join(parts)
+
+
+@dataclass
+class NeighborhoodPacket:
+    focus: EntityRef
+    edge_type: str
+    packets: list[EvidencePacket]
+    limit: int
+    truncated: bool = False
+
+    def source_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for packet in self.packets:
+            for source in set(packet.values("source", "data_source", "knowledge_source")):
+                counts[source] = counts.get(source, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def multi_source_packets(self) -> list[EvidencePacket]:
+        return [
+            packet
+            for packet in self.packets
+            if len(set(packet.values("source", "data_source", "knowledge_source"))) > 1
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        multi_source = self.multi_source_packets()
+        return {
+            "focus": {"label": self.focus.label, "id": self.focus.identifier},
+            "edge_type": self.edge_type,
+            "total_edges": len(self.packets),
+            "limit": self.limit,
+            "truncated": self.truncated,
+            "source_counts": self.source_counts(),
+            "multi_source_edges": len(multi_source),
+            "packets": [packet.to_dict() for packet in self.packets],
+        }
+
+    def short_summary(self) -> str:
+        total = len(self.packets)
+        multi = len(self.multi_source_packets())
+        sources = self.source_counts()
+        if total == 0:
+            return f"No {self.edge_type} edges found around {self.focus.label}:{self.focus.identifier}."
+        source_text = ", ".join(f"{source}={count}" for source, count in sources.items()) or "no source annotations"
+        suffix = " Results were truncated by the limit." if self.truncated else ""
+        return (
+            f"Found {total} {self.edge_type} edge(s) around {self.focus.label}:{self.focus.identifier}; "
+            f"{multi} have multi-source support. Source counts: {source_text}.{suffix}"
+        )

@@ -149,6 +149,45 @@ The first reasoning target is exact-edge evidence audit:
 - does it have literature/context/evidence annotations?
 - is it single-source, multi-source, scored, referenced, or missing support?
 
+## Extract A Neighborhood
+
+Exact-edge lookup is useful for debugging, but BioClaw becomes more valuable
+when it extracts a bounded neighborhood and identifies source support across
+many related edges.
+
+For example, inspect all `interacts_with` edges around one protein:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
+  --mork http://localhost:8037 \
+  --namespace annotation \
+  --entity protein:P20645 \
+  --edge interacts_with \
+  --direction both \
+  --limit 100 \
+  --reason
+```
+
+The output summarizes:
+
+- total incident edges found;
+- source counts across the neighborhood;
+- how many edges have multi-source support;
+- which edges are actionable under the configured reasoning policy;
+- whether results were truncated by the limit.
+
+Use `--include-packets` when you want every edge packet in the JSON output:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
+  --mork http://localhost:8037 \
+  --namespace annotation \
+  --entity protein:P20645 \
+  --edge interacts_with \
+  --include-packets \
+  --reason
+```
+
 ## What Was Removed From The Old System
 
 This branch deliberately removes:

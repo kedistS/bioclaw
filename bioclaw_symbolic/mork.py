@@ -4,7 +4,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from .evidence import EntityRef, EvidencePacket, edge_atom
+from .evidence import EntityRef, EvidencePacket, NeighborhoodPacket, edge_atom
 
 
 DEFAULT_ANNOTATIONS = [
@@ -86,4 +86,70 @@ class MorkClient:
             target=target,
             exists=exists,
             annotations=packet_annotations,
+        )
+
+    @staticmethod
+    def _parse_neighbor_rows(rows: list[str], tag: str) -> list[tuple[str, str]]:
+        parsed: list[tuple[str, str]] = []
+        prefix = f"({tag} "
+        for row in rows:
+            if not (row.startswith(prefix) and row.endswith(")")):
+                continue
+            body = row[len(prefix) : -1].strip()
+            parts = body.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            parsed.append((parts[0], parts[1]))
+        return parsed
+
+    def neighborhood(
+        self,
+        edge_type: str,
+        focus: EntityRef,
+        direction: str = "both",
+        limit: int = 100,
+        annotations: list[str] | None = None,
+    ) -> NeighborhoodPacket:
+        if direction not in {"incoming", "outgoing", "both"}:
+            raise ValueError("direction must be incoming, outgoing, or both")
+
+        packets: list[EvidencePacket] = []
+        seen: set[str] = set()
+        truncated = False
+
+        queries: list[tuple[str, str]] = []
+        if direction in {"outgoing", "both"}:
+            queries.append(("outgoing", f"({edge_type} {focus.atom()} ($other_label $other_id))"))
+        if direction in {"incoming", "both"}:
+            queries.append(("incoming", f"({edge_type} ($other_label $other_id) {focus.atom()})"))
+
+        for query_direction, pattern in queries:
+            tag = f"bioclaw_neighbor_{query_direction}"
+            rows = self.export(self._wrap(pattern), f"({tag} $other_label $other_id)")
+            for other_label, other_id in self._parse_neighbor_rows(rows, tag):
+                other = EntityRef(other_label, other_id)
+                if query_direction == "outgoing":
+                    packet = self.evidence_packet(edge_type, focus, other, annotations)
+                else:
+                    packet = self.evidence_packet(edge_type, other, focus, annotations)
+                if packet.edge_atom in seen:
+                    continue
+                seen.add(packet.edge_atom)
+                packets.append(packet)
+                if len(packets) >= limit:
+                    truncated = True
+                    return NeighborhoodPacket(
+                        focus=focus,
+                        edge_type=edge_type,
+                        packets=packets,
+                        limit=limit,
+                        truncated=truncated,
+                    )
+
+        return NeighborhoodPacket(
+            focus=focus,
+            edge_type=edge_type,
+            packets=packets,
+            limit=limit,
+            truncated=truncated,
         )

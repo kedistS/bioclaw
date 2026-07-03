@@ -5,7 +5,7 @@ from math import prod
 from pathlib import Path
 from typing import Any
 
-from .evidence import EvidencePacket
+from .evidence import EvidencePacket, NeighborhoodPacket
 from .yaml_compat import load_yaml
 
 
@@ -119,3 +119,28 @@ def packet_assessment(packet: EvidencePacket, policy: dict[str, Any] | None = No
         pieces.append(f"Context: {', '.join(context[:8])}.")
 
     return SymbolicAssessment(labels=labels, stv=(round(strength, 6), round(confidence, 6)), explanation=" ".join(pieces))
+
+
+def neighborhood_assessment(
+    neighborhood: NeighborhoodPacket,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = policy or load_policy(None)
+    packet_assessments = [
+        {"edge": packet.edge_atom, **packet_assessment(packet, policy).to_dict()}
+        for packet in neighborhood.packets
+    ]
+    multi_source = [item for item in packet_assessments if "multi_source" in item["labels"]]
+    actionable = [item for item in packet_assessments if "actionable" in item["labels"]]
+    return {
+        "labels": [
+            "neighborhood_present" if neighborhood.packets else "neighborhood_empty",
+            "contains_multi_source_edges" if multi_source else "no_multi_source_edges",
+            "truncated" if neighborhood.truncated else "complete_within_limit",
+        ],
+        "total_edges": len(neighborhood.packets),
+        "multi_source_edges": len(multi_source),
+        "actionable_edges": len(actionable),
+        "source_counts": neighborhood.source_counts(),
+        "top_multi_source_edges": multi_source[:10],
+    }
