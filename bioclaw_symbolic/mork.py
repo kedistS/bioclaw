@@ -45,6 +45,47 @@ class MorkClient:
                 values.append(row[len(prefix) : -1].strip())
         return values
 
+    @staticmethod
+    def _parse_annotation_rows(rows: list[str], tag: str) -> list[tuple[str, str]]:
+        parsed: list[tuple[str, str]] = []
+        prefix = f"({tag} "
+        for row in rows:
+            if not (row.startswith(prefix) and row.endswith(")")):
+                continue
+            body = row[len(prefix) : -1].strip()
+            parts = body.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            parsed.append((parts[0], parts[1]))
+        return parsed
+
+    def observed_annotations(self, expression: str, sample_values: int = 3) -> dict[str, dict[str, Any]]:
+        tag = "bioclaw_observed_annotation"
+        rows = self.export(self._wrap(f"($annotation {expression} $value)"), f"({tag} $annotation $value)")
+        observed: dict[str, dict[str, Any]] = {}
+        for annotation, value in self._parse_annotation_rows(rows, tag):
+            entry = observed.setdefault(annotation, {"count": 0, "sample_values": []})
+            entry["count"] += 1
+            if len(entry["sample_values"]) < sample_values and value not in entry["sample_values"]:
+                entry["sample_values"].append(value)
+        return observed
+
+    def observed_neighborhood_annotations(
+        self,
+        neighborhood: NeighborhoodPacket,
+        sample_values: int = 3,
+    ) -> dict[str, dict[str, Any]]:
+        observed: dict[str, dict[str, Any]] = {}
+        for packet in neighborhood.packets:
+            for annotation, entry in self.observed_annotations(packet.edge_atom, sample_values).items():
+                aggregate = observed.setdefault(annotation, {"edge_count": 0, "value_count": 0, "sample_values": []})
+                aggregate["edge_count"] += 1
+                aggregate["value_count"] += entry["count"]
+                for value in entry["sample_values"]:
+                    if len(aggregate["sample_values"]) < sample_values and value not in aggregate["sample_values"]:
+                        aggregate["sample_values"].append(value)
+        return observed
+
     def entity_annotation_values(self, entity: EntityRef, annotation: str) -> list[str]:
         return self.annotation_values(entity.atom(), annotation)
 

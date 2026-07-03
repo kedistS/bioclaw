@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .audit import property_audit
 from .evidence import EntityRef
 from .mork import MorkClient
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
@@ -198,6 +199,22 @@ def cmd_neighborhood(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_properties(args: argparse.Namespace) -> int:
+    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    neighborhood = client.neighborhood(
+        edge_type=args.edge,
+        focus=EntityRef.parse(args.entity),
+        direction=args.direction,
+        limit=args.max_total,
+        annotations=[],
+    )
+    observed = client.observed_neighborhood_annotations(neighborhood, sample_values=args.sample_values)
+    audit = property_audit(neighborhood, registry, observed)
+    _print_json(audit.to_dict())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bioclaw-symbolic")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -242,6 +259,19 @@ def build_parser() -> argparse.ArgumentParser:
     neighborhood.add_argument("--reason", action="store_true", help="add bounded symbolic neighborhood assessment")
     neighborhood.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     neighborhood.set_defaults(func=cmd_neighborhood)
+
+    audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
+    audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    audit.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
+    audit.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    audit.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    audit.add_argument("--entity", required=True, help="focus entity as label:id")
+    audit.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    audit.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    audit.add_argument("--max-total", type=int, default=100, help="maximum candidate edges to audit")
+    audit.add_argument("--sample-values", type=int, default=3, help="sample values to keep per observed property")
+    audit.add_argument("--timeout", type=int, default=30)
+    audit.set_defaults(func=cmd_audit_properties)
 
     return parser
 

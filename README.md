@@ -126,7 +126,9 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli edge \
   --include-node-details
 ```
 
-Expected shape for the current PPI test atomspace:
+Expected shape for the current PPI test atomspace depends on the active schema.
+For `interacts_with`, the schema-driven output includes declared edge
+properties such as:
 
 ```json
 {
@@ -135,8 +137,7 @@ Expected shape for the current PPI test atomspace:
   "annotations": {
     "source": ["STRING", "Reactome"],
     "score": ["0.547"],
-    "interaction_context": ["R-HSA-6814662"],
-    "pubmed_references": ["19490898", "21421921"],
+    "source_url": ["https://reactome.org/", "https://string-db.org/"],
     "interaction_type": ["physical_association"]
   }
 }
@@ -257,6 +258,36 @@ then queries those properties from MORK. This keeps node enrichment data-driven
 instead of hardcoding protein/gene/pathway property names in the code. Use
 `--schema-policy /path/to/schema_roles.yaml` to swap the policy for another
 atomspace.
+
+## Audit Schema / Atomspace Alignment
+
+Because BioClaw is schema-driven, it can also find mismatches between what the
+schema declares and what MORK actually contains. This is useful for large KG
+quality control.
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli audit-properties \
+  --mork http://localhost:8037 \
+  --namespace annotation \
+  --schema /path/to/biocypher-kg/config/hsa/hsa_schema_config.yaml \
+  --schema-policy config/schema_roles.yaml \
+  --entity protein:P20645 \
+  --edge interacts_with \
+  --direction both \
+  --max-total 1000
+```
+
+The report compares:
+
+- schema-declared edge properties;
+- observed MORK annotation predicates on sampled edge atoms;
+- observed properties missing from the schema;
+- schema-declared properties not observed in the sampled atomspace.
+
+If MORK contains an annotation such as `pubmed_references` but the active schema
+does not declare it for the edge type, this command should report it as
+`missing_from_schema`. That should be fixed in the schema/adapter layer rather
+than patched into BioClaw Python code.
 
 ## What Was Removed From The Old System
 
