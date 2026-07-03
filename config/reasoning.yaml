@@ -1,0 +1,43 @@
+# Neutral BioClaw Symbolic reasoning policy.
+#
+# This file does not encode biological relationships. It only controls how
+# packet-local evidence is interpreted when the MORK BioAtomspace provides
+# confidence-bearing annotations.
+
+default_stv: [1.0, 0.5]
+action_threshold: 0.5
+
+# Annotation names that can carry direct confidence values.
+confidence_annotations:
+  - confidence
+  - edge_confidence
+  - staging_confidence
+
+# Annotation names that can carry numeric scores.
+score_annotations:
+  - score
+  - edge_score
+
+# Annotation groups used for audit labels.
+source_annotations:
+  - source
+  - data_source
+  - knowledge_source
+
+evidence_annotations:
+  - evidence
+  - evidence_code
+  - evidence_code_name
+
+reference_annotations:
+  - reference
+  - references
+  - db_reference
+  - pubmed_references
+  - source_url
+
+context_annotations:
+  - biological_context
+  - interaction_context
+  - interaction_type
+  - reactome_pathway
