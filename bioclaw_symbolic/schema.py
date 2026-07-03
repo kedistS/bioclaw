@@ -204,6 +204,13 @@ class SchemaRegistry:
             names.update(prop.name for prop in edge.properties)
         return sorted(names)
 
+    def edge_annotation_roles(self, label: str) -> dict[str, str]:
+        roles: dict[str, str] = {}
+        for edge in self.by_label(label):
+            for prop in edge.properties:
+                roles[prop.name] = prop.role
+        return dict(sorted(roles.items()))
+
     def node_by_label(self, label: str) -> NodeCapability | None:
         for node in self.nodes:
             if node.label == label or node.name == label:

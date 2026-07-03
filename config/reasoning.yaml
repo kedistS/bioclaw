@@ -7,6 +7,10 @@
 default_stv: [1.0, 0.5]
 action_threshold: 0.5
 
+# Annotation-name groups below are fallbacks for running without a schema role
+# policy. When a command is run with --schema, BioClaw uses schema-derived roles
+# attached to each evidence packet instead.
+
 # Annotation names that can carry direct confidence values.
 confidence_annotations:
   - confidence

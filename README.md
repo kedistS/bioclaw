@@ -10,7 +10,8 @@ on the part that is not already solved by ordinary assistant systems:
 - inspect the loaded BioCypher schema and adapter-derived edge capabilities;
 - extract bounded evidence packets from MORK BioAtomspace;
 - preserve atom-level provenance, score, evidence, context, and references;
-- run focused symbolic reasoning over the retrieved packet;
+- classify retrieved annotations through schema roles before reasoning;
+- run focused symbolic reasoning over the retrieved packet roles;
 - produce auditable evidence objects for curators and downstream pipelines.
 
 BioClaw does not treat LLM text or workflow memory as biological truth. The
@@ -33,9 +34,9 @@ Planner / CLI / future skill
     |       evidence, reference, and context atoms.
     |
     +--> Symbolic reasoner
-    |       Applies packet-local PLN/NAL-style operations such as source
-    |       aggregation, revision over confidence-bearing evidence, schema-path
-    |       trace status, and curation-state labels.
+    |       Applies packet-local PLN/NAL-style operations over schema roles:
+    |       source aggregation, revision over confidence-bearing evidence,
+    |       schema-path trace status, and curation-state labels.
     |
     +--> Report / export
             Emits JSON evidence objects and concise curator-facing summaries.
@@ -88,7 +89,7 @@ BioClaw expects:
 - a BioCypher schema YAML matching the loaded data;
 - a schema role policy YAML that maps schema properties to roles such as
   source, score, evidence, reference, context, name, xref, and description;
-- optional reasoning policy YAML.
+- optional reasoning policy YAML for thresholds and no-schema fallback names.
 
 For the PPI experiment, the MORK service was loaded separately on port `8037`
 with STRING, Reactome, and UniProt MeTTa files. The MORK namespace used by the
@@ -108,10 +109,14 @@ The mapping is not embedded in Python; it comes from `config/schema_roles.yaml`
 and can be replaced for a different MORK BioAtomspace.
 
 When a command receives `--schema`, BioClaw queries edge annotations from the
-properties declared for that edge class in the schema. If a MORK atom has an
-extra annotation that is not declared by the active schema, BioClaw treats that
-as a schema/adapter alignment issue rather than silently relying on a Python
-hardcoded property list.
+properties declared for that edge class in the schema and attaches each
+annotation's role to the evidence packet. Summaries, multi-source filtering,
+symbolic assessment, and CSV exports then use roles such as `source`, `score`,
+`reference`, and `context` instead of fixed annotation names.
+
+If a MORK atom has an extra annotation that is not declared by the active
+schema, BioClaw treats that as a schema/adapter alignment issue rather than
+silently relying on a Python hardcoded property list.
 
 ## Extract An Exact Edge Evidence Packet
 
@@ -159,12 +164,13 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli edge \
   --reason
 ```
 
-The first reasoning target is exact-edge evidence audit:
+The first reasoning target is exact-edge evidence audit. With `--schema`, this
+audit is role-based:
 
 - does the edge exist?
-- which sources support it?
-- does it have confidence-bearing score/confidence annotations?
-- does it have literature/context/evidence annotations?
+- which annotations have the `source` role and what sources support it?
+- which annotations have `score` or `confidence` roles?
+- which annotations have `reference`, `context`, or `evidence` roles?
 - is it single-source, multi-source, scored, referenced, or missing support?
 
 ## Extract A Neighborhood
@@ -245,7 +251,10 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
   --format json
 ```
 
-Supported export formats are `json`, `jsonl`, and `csv`.
+Supported export formats are `json`, `jsonl`, and `csv`. JSON/JSONL retain raw
+annotation names plus their schema-derived roles. CSV keeps stable role-based
+columns (`sources`, `scores`, `evidence`, `references`, `context`) so downstream
+pipelines do not need to know every source-specific annotation name.
 
 Current pagination status: this is bounded retrieval plus export. Native MORK
 cursor pagination is not used yet, so `--max-total` is still a safety cap and

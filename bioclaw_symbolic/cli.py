@@ -62,6 +62,9 @@ def _write_neighborhood_export(
         return
 
     if export_format == "csv":
+        def values_for(packet, *roles: str) -> str:
+            return "|".join(packet.values_by_role(*roles))
+
         with target.open("w", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
@@ -99,11 +102,11 @@ def _write_neighborhood_export(
                         "target_label": packet.target.label,
                         "target_id": packet.target.identifier,
                         "target_name": packet_dict["target"].get("name", ""),
-                        "sources": "|".join(packet.values("source", "data_source", "knowledge_source")),
-                        "scores": "|".join(packet.values("score", "edge_score", "confidence", "edge_confidence")),
-                        "evidence": "|".join(packet.values("evidence", "evidence_code", "evidence_code_name")),
-                        "references": "|".join(packet.values("reference", "references", "db_reference", "pubmed_references", "source_url")),
-                        "context": "|".join(packet.values("biological_context", "interaction_context", "interaction_type", "reactome_pathway")),
+                        "sources": values_for(packet, "source"),
+                        "scores": values_for(packet, "score", "confidence"),
+                        "evidence": values_for(packet, "evidence"),
+                        "references": values_for(packet, "reference"),
+                        "context": values_for(packet, "context"),
                         "labels": "|".join(assessment.get("labels", [])),
                         "strength": stv.get("strength", ""),
                         "confidence": stv.get("confidence", ""),
@@ -129,11 +132,13 @@ def cmd_edge(args: argparse.Namespace) -> int:
     client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
     annotations = registry.edge_annotation_names(args.edge) if registry else []
+    annotation_roles = registry.edge_annotation_roles(args.edge) if registry else {}
     packet = client.evidence_packet(
         edge_type=args.edge,
         source=EntityRef.parse(args.source),
         target=EntityRef.parse(args.target),
         annotations=annotations,
+        annotation_roles=annotation_roles,
     )
     if args.include_node_details:
         if registry is None:
@@ -153,6 +158,7 @@ def cmd_neighborhood(args: argparse.Namespace) -> int:
     if args.include_node_details and registry is None:
         raise ValueError("--schema is required with --include-node-details")
     annotations = registry.edge_annotation_names(args.edge) if registry else []
+    annotation_roles = registry.edge_annotation_roles(args.edge) if registry else {}
     retrieval_limit = args.max_total if args.max_total is not None else args.limit
     raw_neighborhood = client.neighborhood(
         edge_type=args.edge,
@@ -160,6 +166,7 @@ def cmd_neighborhood(args: argparse.Namespace) -> int:
         direction=args.direction,
         limit=retrieval_limit,
         annotations=annotations,
+        annotation_roles=annotation_roles,
     )
     if registry is not None:
         raw_neighborhood = client.enrich_neighborhood_nodes(raw_neighborhood, registry)

@@ -127,6 +127,7 @@ class MorkClient:
         source: EntityRef,
         target: EntityRef,
         annotations: list[str] | None = None,
+        annotation_roles: dict[str, str] | None = None,
     ) -> EvidencePacket:
         expression = edge_atom(edge_type, source.label, source.identifier, target.label, target.identifier)
         exists = self.atom_exists(expression)
@@ -141,6 +142,7 @@ class MorkClient:
             target=target,
             exists=exists,
             annotations=packet_annotations,
+            annotation_roles=annotation_roles or {},
         )
 
     @staticmethod
@@ -164,6 +166,7 @@ class MorkClient:
         direction: str = "both",
         limit: int = 100,
         annotations: list[str] | None = None,
+        annotation_roles: dict[str, str] | None = None,
     ) -> NeighborhoodPacket:
         if direction not in {"incoming", "outgoing", "both"}:
             raise ValueError("direction must be incoming, outgoing, or both")
@@ -184,9 +187,9 @@ class MorkClient:
             for other_label, other_id in self._parse_neighbor_rows(rows, tag):
                 other = EntityRef(other_label, other_id)
                 if query_direction == "outgoing":
-                    packet = self.evidence_packet(edge_type, focus, other, annotations)
+                    packet = self.evidence_packet(edge_type, focus, other, annotations, annotation_roles)
                 else:
-                    packet = self.evidence_packet(edge_type, other, focus, annotations)
+                    packet = self.evidence_packet(edge_type, other, focus, annotations, annotation_roles)
                 if packet.edge_atom in seen:
                     continue
                 seen.add(packet.edge_atom)

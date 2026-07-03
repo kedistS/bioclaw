@@ -39,6 +39,7 @@ class EvidencePacket:
     target: EntityRef
     exists: bool
     annotations: dict[str, list[str]] = field(default_factory=dict)
+    annotation_roles: dict[str, str] = field(default_factory=dict)
     source_details: dict[str, Any] = field(default_factory=dict)
     target_details: dict[str, Any] = field(default_factory=dict)
 
@@ -56,6 +57,14 @@ class EvidencePacket:
         out: list[str] = []
         for name in names:
             out.extend(self.annotations.get(name, []))
+        return out
+
+    def values_by_role(self, *roles: str) -> list[str]:
+        wanted = set(roles)
+        out: list[str] = []
+        for name, values in self.annotations.items():
+            if self.annotation_roles.get(name) in wanted:
+                out.extend(values)
         return out
 
     @staticmethod
@@ -91,6 +100,7 @@ class EvidencePacket:
             target=self.target,
             exists=self.exists,
             annotations=self.annotations,
+            annotation_roles=self.annotation_roles,
             source_details=source_details,
             target_details=target_details,
         )
@@ -103,19 +113,20 @@ class EvidencePacket:
             "target": self._entity_dict(self.target, self.target_details),
             "exists": self.exists,
             "annotations": self.annotations,
+            "annotation_roles": self.annotation_roles,
         }
 
     def short_summary(self) -> str:
         if not self.exists:
             return f"No edge atom found for {self.edge_atom}."
         parts = [f"Found edge atom {self.edge_atom}."]
-        sources = self.values("source", "data_source", "knowledge_source")
+        sources = self.values_by_role("source")
         if sources:
             parts.append(f"Sources: {', '.join(sorted(set(sources)))}.")
-        scores = self.values("score", "edge_score", "confidence", "edge_confidence")
+        scores = self.values_by_role("score", "confidence")
         if scores:
             parts.append(f"Confidence-bearing values: {', '.join(scores)}.")
-        refs = self.values("reference", "references", "db_reference", "pubmed_references", "source_url")
+        refs = self.values_by_role("reference")
         if refs:
             parts.append(f"References/context ids: {', '.join(refs[:8])}.")
         return " ".join(parts)
@@ -132,7 +143,7 @@ class NeighborhoodPacket:
     def source_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for packet in self.packets:
-            for source in set(packet.values("source", "data_source", "knowledge_source")):
+            for source in set(packet.values_by_role("source")):
                 counts[source] = counts.get(source, 0) + 1
         return dict(sorted(counts.items()))
 
@@ -140,7 +151,7 @@ class NeighborhoodPacket:
         return [
             packet
             for packet in self.packets
-            if len(set(packet.values("source", "data_source", "knowledge_source"))) > 1
+            if len(set(packet.values_by_role("source"))) > 1
         ]
 
     def with_packets(self, packets: list[EvidencePacket]) -> "NeighborhoodPacket":

@@ -60,6 +60,22 @@ def _unique_values(packet: EvidencePacket, names: list[str]) -> list[str]:
     return sorted(set(values))
 
 
+def _numeric_role_values(packet: EvidencePacket, roles: list[str], fallback_names: list[str]) -> list[float]:
+    values: list[float] = []
+    raw_values = packet.values_by_role(*roles) if packet.annotation_roles else packet.values(*fallback_names)
+    for raw in raw_values:
+        try:
+            values.append(float(raw))
+        except ValueError:
+            continue
+    return [max(0.0, min(1.0, value)) for value in values]
+
+
+def _unique_role_values(packet: EvidencePacket, roles: list[str], fallback_names: list[str]) -> list[str]:
+    values = packet.values_by_role(*roles) if packet.annotation_roles else packet.values(*fallback_names)
+    return sorted(set(values))
+
+
 def packet_assessment(packet: EvidencePacket, policy: dict[str, Any] | None = None) -> SymbolicAssessment:
     policy = policy or load_policy(None)
     labels: list[str] = []
@@ -72,11 +88,15 @@ def packet_assessment(packet: EvidencePacket, policy: dict[str, Any] | None = No
         )
 
     labels.append("edge_present")
-    sources = _unique_values(packet, policy["source_annotations"])
-    scores = _numeric_values(packet, policy["confidence_annotations"]) + _numeric_values(packet, policy["score_annotations"])
-    evidence = _unique_values(packet, policy["evidence_annotations"])
-    references = _unique_values(packet, policy["reference_annotations"])
-    context = _unique_values(packet, policy["context_annotations"])
+    sources = _unique_role_values(packet, ["source"], policy["source_annotations"])
+    scores = _numeric_role_values(
+        packet,
+        ["score", "confidence"],
+        policy["confidence_annotations"] + policy["score_annotations"],
+    )
+    evidence = _unique_role_values(packet, ["evidence"], policy["evidence_annotations"])
+    references = _unique_role_values(packet, ["reference"], policy["reference_annotations"])
+    context = _unique_role_values(packet, ["context"], policy["context_annotations"])
 
     if len(sources) > 1:
         labels.append("multi_source")
