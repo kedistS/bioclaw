@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from .evidence import EntityRef
@@ -13,6 +15,95 @@ from .schema import SchemaRegistry
 
 def _print_json(data: Any) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
+
+
+def _packet_assessments_by_edge(neighborhood, policy: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if policy is None:
+        return {}
+    return {
+        packet.edge_atom: packet_assessment(packet, policy).to_dict()
+        for packet in neighborhood.packets
+    }
+
+
+def _write_neighborhood_export(
+    path: str,
+    export_format: str,
+    neighborhood,
+    assessment_by_edge: dict[str, dict[str, Any]],
+) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if export_format == "json":
+        target.write_text(
+            json.dumps(
+                {
+                    "neighborhood": neighborhood.to_dict(),
+                    "packet_assessments": assessment_by_edge,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return
+
+    if export_format == "jsonl":
+        with target.open("w") as handle:
+            for packet in neighborhood.packets:
+                row = packet.to_dict()
+                if packet.edge_atom in assessment_by_edge:
+                    row["assessment"] = assessment_by_edge[packet.edge_atom]
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+        return
+
+    if export_format == "csv":
+        with target.open("w", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "edge",
+                    "edge_type",
+                    "source_label",
+                    "source_id",
+                    "target_label",
+                    "target_id",
+                    "sources",
+                    "scores",
+                    "evidence",
+                    "references",
+                    "context",
+                    "labels",
+                    "strength",
+                    "confidence",
+                ],
+            )
+            writer.writeheader()
+            for packet in neighborhood.packets:
+                assessment = assessment_by_edge.get(packet.edge_atom, {})
+                stv = assessment.get("stv", {})
+                writer.writerow(
+                    {
+                        "edge": packet.edge_atom,
+                        "edge_type": packet.edge_type,
+                        "source_label": packet.source.label,
+                        "source_id": packet.source.identifier,
+                        "target_label": packet.target.label,
+                        "target_id": packet.target.identifier,
+                        "sources": "|".join(packet.values("source", "data_source", "knowledge_source")),
+                        "scores": "|".join(packet.values("score", "edge_score", "confidence", "edge_confidence")),
+                        "evidence": "|".join(packet.values("evidence", "evidence_code", "evidence_code_name")),
+                        "references": "|".join(packet.values("reference", "references", "db_reference", "pubmed_references", "source_url")),
+                        "context": "|".join(packet.values("biological_context", "interaction_context", "interaction_type", "reactome_pathway")),
+                        "labels": "|".join(assessment.get("labels", [])),
+                        "strength": stv.get("strength", ""),
+                        "confidence": stv.get("confidence", ""),
+                    }
+                )
+        return
+
+    raise ValueError(f"unknown export format {export_format!r}")
 
 
 def cmd_schema(args: argparse.Namespace) -> int:
@@ -43,23 +134,45 @@ def cmd_edge(args: argparse.Namespace) -> int:
 
 def cmd_neighborhood(args: argparse.Namespace) -> int:
     client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
-    neighborhood = client.neighborhood(
+    retrieval_limit = args.max_total if args.max_total is not None else args.limit
+    raw_neighborhood = client.neighborhood(
         edge_type=args.edge,
         focus=EntityRef.parse(args.entity),
         direction=args.direction,
-        limit=args.limit,
+        limit=retrieval_limit,
     )
+    neighborhood = raw_neighborhood
+    if args.only_multisource:
+        neighborhood = raw_neighborhood.with_packets(raw_neighborhood.multi_source_packets())
+
+    policy = load_policy(args.reasoning) if args.reason else None
+    assessment_by_edge = _packet_assessments_by_edge(neighborhood, policy)
     data: dict[str, Any] = {
         "neighborhood": neighborhood.to_dict() if args.include_packets else {
             key: value
             for key, value in neighborhood.to_dict().items()
             if key != "packets"
         },
+        "retrieval": {
+            "candidate_edges": len(raw_neighborhood.packets),
+            "returned_edges": len(neighborhood.packets),
+            "limit": retrieval_limit,
+            "truncated": raw_neighborhood.truncated,
+            "only_multisource": args.only_multisource,
+            "filter_scope": "within bounded retrieval result",
+            "pagination": "bounded_export; native MORK cursor pagination is not used yet",
+        },
         "summary": neighborhood.short_summary(),
     }
     if args.reason:
-        policy = load_policy(args.reasoning)
         data["assessment"] = neighborhood_assessment(neighborhood, policy)
+    if args.export:
+        _write_neighborhood_export(args.export, args.format, neighborhood, assessment_by_edge)
+        data["export"] = {
+            "path": args.export,
+            "format": args.format,
+            "edges": len(neighborhood.packets),
+        }
     _print_json(data)
     return 0
 
@@ -91,9 +204,13 @@ def build_parser() -> argparse.ArgumentParser:
     neighborhood.add_argument("--entity", required=True, help="focus entity as label:id")
     neighborhood.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     neighborhood.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
-    neighborhood.add_argument("--limit", type=int, default=100)
+    neighborhood.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
+    neighborhood.add_argument("--max-total", type=int, help="maximum candidate edges to retrieve/process; overrides --limit")
     neighborhood.add_argument("--timeout", type=int, default=30)
     neighborhood.add_argument("--include-packets", action="store_true", help="include every edge packet in JSON output")
+    neighborhood.add_argument("--only-multisource", action="store_true", help="return/export only edges with more than one source annotation")
+    neighborhood.add_argument("--export", help="write returned neighborhood packets to a file")
+    neighborhood.add_argument("--format", choices=["json", "jsonl", "csv"], default="json", help="export format")
     neighborhood.add_argument("--reason", action="store_true", help="add bounded symbolic neighborhood assessment")
     neighborhood.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     neighborhood.set_defaults(func=cmd_neighborhood)

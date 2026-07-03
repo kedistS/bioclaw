@@ -164,7 +164,7 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
   --entity protein:P20645 \
   --edge interacts_with \
   --direction both \
-  --limit 100 \
+  --max-total 100 \
   --reason
 ```
 
@@ -174,7 +174,22 @@ The output summarizes:
 - source counts across the neighborhood;
 - how many edges have multi-source support;
 - which edges are actionable under the configured reasoning policy;
-- whether results were truncated by the limit.
+- whether results were truncated by the safety cap.
+
+Use `--only-multisource` to return only edges that have more than one source
+annotation within the bounded retrieval result:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
+  --mork http://localhost:8037 \
+  --namespace annotation \
+  --entity protein:P20645 \
+  --edge interacts_with \
+  --direction both \
+  --max-total 1000 \
+  --only-multisource \
+  --reason
+```
 
 Use `--include-packets` when you want every edge packet in the JSON output:
 
@@ -187,6 +202,29 @@ PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
   --include-packets \
   --reason
 ```
+
+Use `--export` to write the returned packet set to a file:
+
+```bash
+PYTHONPATH=. python3 -m bioclaw_symbolic.cli neighborhood \
+  --mork http://localhost:8037 \
+  --namespace annotation \
+  --entity protein:P20645 \
+  --edge interacts_with \
+  --direction both \
+  --max-total 1000 \
+  --only-multisource \
+  --reason \
+  --export p20645_multisource_interactions.json \
+  --format json
+```
+
+Supported export formats are `json`, `jsonl`, and `csv`.
+
+Current pagination status: this is bounded retrieval plus export. Native MORK
+cursor pagination is not used yet, so `--max-total` is still a safety cap and
+`truncated=true` means the result is partial. For full-scale analysis, increase
+`--max-total` deliberately and export to JSONL or CSV.
 
 ## What Was Removed From The Old System
 

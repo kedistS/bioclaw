@@ -104,6 +104,15 @@ class NeighborhoodPacket:
             if len(set(packet.values("source", "data_source", "knowledge_source"))) > 1
         ]
 
+    def with_packets(self, packets: list[EvidencePacket]) -> "NeighborhoodPacket":
+        return NeighborhoodPacket(
+            focus=self.focus,
+            edge_type=self.edge_type,
+            packets=packets,
+            limit=self.limit,
+            truncated=self.truncated,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         multi_source = self.multi_source_packets()
         return {
