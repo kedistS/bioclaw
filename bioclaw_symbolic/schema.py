@@ -211,6 +211,16 @@ class SchemaRegistry:
                 roles[prop.name] = prop.role
         return dict(sorted(roles.items()))
 
+    def name_properties(self) -> list[str]:
+        names: list[str] = []
+        for node in self.nodes:
+            for prop in node.properties:
+                if prop.role == "name" and prop.name not in names:
+                    names.append(prop.name)
+        if "id" not in names:
+            names.append("id")
+        return names
+
     def node_by_label(self, label: str) -> NodeCapability | None:
         for node in self.nodes:
             if node.label == label or node.name == label:

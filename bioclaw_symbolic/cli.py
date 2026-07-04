@@ -130,15 +130,32 @@ def cmd_schema(args: argparse.Namespace) -> int:
     return 0
 
 
+def _client(args: argparse.Namespace) -> MorkClient:
+    return MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+
+
+def _resolve_entity_arg(
+    value: str,
+    client: MorkClient | None,
+    registry: SchemaRegistry | None,
+    label: str | None = None,
+) -> EntityRef:
+    if client is not None and registry is not None:
+        resolved = client.resolve_entity(value, registry, label)
+        if resolved is not None:
+            return resolved
+    return EntityRef.parse(value)
+
+
 def cmd_edge(args: argparse.Namespace) -> int:
-    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+    client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
     annotations = registry.edge_annotation_names(args.edge) if registry else []
     annotation_roles = registry.edge_annotation_roles(args.edge) if registry else {}
     packet = client.evidence_packet(
         edge_type=args.edge,
-        source=EntityRef.parse(args.source),
-        target=EntityRef.parse(args.target),
+        source=_resolve_entity_arg(args.source, client, registry) if registry else EntityRef.parse(args.source),
+        target=_resolve_entity_arg(args.target, client, registry) if registry else EntityRef.parse(args.target),
         annotations=annotations,
         annotation_roles=annotation_roles,
     )
@@ -155,16 +172,17 @@ def cmd_edge(args: argparse.Namespace) -> int:
 
 
 def cmd_neighborhood(args: argparse.Namespace) -> int:
-    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+    client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
     if args.include_node_details and registry is None:
         raise ValueError("--schema is required with --include-node-details")
     annotations = registry.edge_annotation_names(args.edge) if registry else []
     annotation_roles = registry.edge_annotation_roles(args.edge) if registry else {}
+    focus = _resolve_entity_arg(args.entity, client, registry) if registry else EntityRef.parse(args.entity)
     retrieval_limit = args.max_total if args.max_total is not None else args.limit
     raw_neighborhood = client.neighborhood(
         edge_type=args.edge,
-        focus=EntityRef.parse(args.entity),
+        focus=focus,
         direction=args.direction,
         limit=retrieval_limit,
         annotations=annotations,
@@ -209,14 +227,15 @@ def cmd_neighborhood(args: argparse.Namespace) -> int:
 
 
 def _retrieve_neighborhood(args: argparse.Namespace) -> tuple[Any, Any]:
-    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+    client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
     annotations = registry.edge_annotation_names(args.edge)
     annotation_roles = registry.edge_annotation_roles(args.edge)
+    focus = _resolve_entity_arg(args.entity, client, registry)
     retrieval_limit = args.max_total if args.max_total is not None else args.limit
     raw_neighborhood = client.neighborhood(
         edge_type=args.edge,
-        focus=EntityRef.parse(args.entity),
+        focus=focus,
         direction=args.direction,
         limit=retrieval_limit,
         annotations=annotations,
@@ -242,7 +261,8 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_schema_path(args: argparse.Namespace) -> int:
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
-    start = EntityRef.parse(args.entity)
+    client = _client(args) if args.mork else None
+    start = _resolve_entity_arg(args.entity, client, registry, args.start_type)
     start_type = args.start_type or start.label
     paths = find_schema_paths(
         registry,
@@ -252,7 +272,6 @@ def cmd_schema_path(args: argparse.Namespace) -> int:
         max_paths=args.max_paths,
     )
     path_entries: list[dict[str, Any]] = []
-    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout) if args.mork else None
     for schema_path in paths:
         entry: dict[str, Any] = {"schema_path": schema_path.to_dict()}
         if client is not None:
@@ -314,11 +333,12 @@ def cmd_schema_path(args: argparse.Namespace) -> int:
 
 
 def cmd_audit_properties(args: argparse.Namespace) -> int:
-    client = MorkClient(base_url=args.mork, namespace=args.namespace, timeout=args.timeout)
+    client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    focus = _resolve_entity_arg(args.entity, client, registry)
     neighborhood = client.neighborhood(
         edge_type=args.edge,
-        focus=EntityRef.parse(args.entity),
+        focus=focus,
         direction=args.direction,
         limit=args.max_total,
         annotations=[],
@@ -342,10 +362,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     edge = sub.add_parser("edge", help="extract one exact-edge evidence packet from MORK")
     edge.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
-    edge.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
-    edge.add_argument("--source", required=True, help="source entity as label:id")
+    edge.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    edge.add_argument("--source", required=True, help="source entity as label:id, or a display name when --schema is supplied")
     edge.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
-    edge.add_argument("--target", required=True, help="target entity as label:id")
+    edge.add_argument("--target", required=True, help="target entity as label:id, or a display name when --schema is supplied")
     edge.add_argument("--timeout", type=int, default=30)
     edge.add_argument("--schema", help="BioCypher schema YAML, required for --include-node-details")
     edge.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
@@ -356,8 +376,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     neighborhood = sub.add_parser("neighborhood", help="extract incident edge evidence packets from MORK")
     neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
-    neighborhood.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
-    neighborhood.add_argument("--entity", required=True, help="focus entity as label:id")
+    neighborhood.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    neighborhood.add_argument("--entity", required=True, help="focus entity as label:id, or a display name when --schema is supplied")
     neighborhood.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     neighborhood.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
     neighborhood.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
@@ -376,10 +396,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = sub.add_parser("report", help="render a ranked curator-facing neighborhood report")
     report.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
-    report.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
+    report.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
     report.add_argument("--schema", required=True, help="BioCypher schema YAML")
     report.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
-    report.add_argument("--entity", required=True, help="focus entity as label:id")
+    report.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
     report.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     report.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
     report.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
@@ -395,13 +415,13 @@ def build_parser() -> argparse.ArgumentParser:
     schema_path = sub.add_parser("schema-path", help="find schema-valid paths and optional MORK path instances")
     schema_path.add_argument("--schema", required=True, help="BioCypher schema YAML")
     schema_path.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
-    schema_path.add_argument("--entity", required=True, help="start entity as label:id")
+    schema_path.add_argument("--entity", required=True, help="start entity as label:id, or a display name when --mork is supplied")
     schema_path.add_argument("--start-type", help="schema start type; defaults to the entity label")
     schema_path.add_argument("--target-type", required=True, help="target schema node type, e.g. protein or pathway")
     schema_path.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
     schema_path.add_argument("--max-paths", type=int, default=20, help="maximum schema paths to return")
     schema_path.add_argument("--mork", help="optional MORK base URL for path instance retrieval")
-    schema_path.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
+    schema_path.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
     schema_path.add_argument("--instances-per-path", type=int, default=20, help="maximum MORK instances per schema path")
     schema_path.add_argument("--diagnose", action="store_true", help="show start atom and per-step MORK traversal counts")
     schema_path.add_argument("--timeout", type=int, default=30)
@@ -410,10 +430,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
-    audit.add_argument("--namespace", default="annotation", help="MORK namespace wrapper, use '-' for none")
+    audit.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
     audit.add_argument("--schema", required=True, help="BioCypher schema YAML")
     audit.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
-    audit.add_argument("--entity", required=True, help="focus entity as label:id")
+    audit.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
     audit.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     audit.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
     audit.add_argument("--max-total", type=int, default=100, help="maximum candidate edges to audit")

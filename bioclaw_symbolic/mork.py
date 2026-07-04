@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import re
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from .evidence import EntityRef, EvidencePacket, NeighborhoodPacket, edge_atom
 from .schema import SchemaRegistry
@@ -13,32 +17,122 @@ from .schema_path import PathInstance, SchemaPath
 @dataclass
 class MorkClient:
     base_url: str
-    namespace: str = "annotation"
+    namespace: str = "auto"
     timeout: int = 30
 
-    def _wrap(self, expression: str) -> str:
-        namespace = self.namespace.strip()
-        if not namespace or namespace == "-":
+    def _namespaces(self) -> list[str]:
+        namespace = (self.namespace or "").strip()
+        if namespace == "auto":
+            return ["annotation", "default", ""]
+        if namespace == "-":
+            return [""]
+        return [namespace]
+
+    @staticmethod
+    def _wrap_with(namespace: str, expression: str) -> str:
+        if not namespace:
             return expression
         return f"({namespace} {expression})"
 
+    def _wrap(self, expression: str) -> str:
+        return self._wrap_with(self._namespaces()[0], expression)
+
+    @staticmethod
+    def _parse_body(body: str) -> list[str]:
+        rows: list[str] = []
+        for line in body.splitlines():
+            row = line.strip()
+            if not row:
+                continue
+            if "$" in row:
+                continue
+            rows.append(row)
+        return rows
+
     def export(self, pattern: str, template: str) -> list[str]:
-        url = "{}/export/{}/{}/".format(
+        for namespace in self._namespaces():
+            query_pattern = self._wrap_with(namespace, pattern)
+            url = "{}/export/{}/{}/".format(
+                self.base_url.rstrip("/"),
+                urllib.parse.quote(query_pattern, safe=""),
+                urllib.parse.quote(template, safe=""),
+            )
+            request = urllib.request.Request(url, headers={"User-Agent": "curl/7.81.0"})
+            data = urllib.request.urlopen(request, timeout=self.timeout).read().decode()
+            rows = self._parse_body(data)
+            if rows:
+                return rows
+        return []
+
+    def transform(self, patterns: list[str], template: str) -> list[str]:
+        for namespace in self._namespaces():
+            rows = self._transform_in_namespace(namespace, patterns, template)
+            if rows:
+                return rows
+        return []
+
+    def _transform_in_namespace(self, namespace: str, patterns: list[str], template: str) -> list[str]:
+        wrapped_patterns = [self._wrap_with(namespace, pattern) for pattern in patterns]
+        payload = "(transform (, {}) (, {}))".format(" ".join(wrapped_patterns), template)
+        request = urllib.request.Request(
+            f"{self.base_url.rstrip('/')}/transform/",
+            data=payload.encode(),
+            headers={
+                "Content-Type": "text/plain",
+                "User-Agent": "curl/7.81.0",
+                "Accept": "*/*",
+            },
+            method="POST",
+        )
+        try:
+            body = urllib.request.urlopen(request, timeout=self.timeout).read().decode()
+        except Exception:
+            return []
+        if "Permission error" in body or "ServerPermissionErr" in body:
+            return []
+
+        status_url = f"{self.base_url.rstrip('/')}/status/{urllib.parse.quote(template, safe='')}/"
+        deadline = time.time() + self.timeout
+        delay = 0.01
+        transient = {"pathReadOnlyTemporary", "pathForbiddenTemporary"}
+        while time.time() < deadline:
+            try:
+                status_body = urllib.request.urlopen(status_url, timeout=5).read().decode()
+                status = json.loads(status_body).get("status", "")
+            except Exception:
+                return []
+            if status == "pathClear":
+                break
+            if status not in transient:
+                return []
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+        else:
+            return []
+
+        export_url = "{}/export/{}/{}/".format(
             self.base_url.rstrip("/"),
-            urllib.parse.quote(pattern, safe=""),
+            urllib.parse.quote(template, safe=""),
             urllib.parse.quote(template, safe=""),
         )
-        request = urllib.request.Request(url, headers={"User-Agent": "bioclaw-symbolic/0.1"})
-        data = urllib.request.urlopen(request, timeout=self.timeout).read().decode()
-        return [line.strip() for line in data.splitlines() if line.strip()]
+        try:
+            result_body = urllib.request.urlopen(export_url, timeout=self.timeout).read().decode()
+        except Exception:
+            return []
+        clear_url = f"{self.base_url.rstrip('/')}/clear/{urllib.parse.quote(template, safe='')}/"
+        try:
+            urllib.request.urlopen(clear_url, timeout=5).read()
+        except Exception:
+            pass
+        return self._parse_body(result_body)
 
     def atom_exists(self, expression: str) -> bool:
-        rows = self.export(self._wrap(expression), expression)
+        rows = self.export(expression, expression)
         return any(row == expression for row in rows)
 
     def annotation_values(self, expression: str, annotation: str) -> list[str]:
         template = f"({annotation} $v)"
-        rows = self.export(self._wrap(f"({annotation} {expression} $v)"), template)
+        rows = self.export(f"({annotation} {expression} $v)", template)
         prefix = f"({annotation} "
         values = []
         for row in rows:
@@ -62,7 +156,7 @@ class MorkClient:
 
     def observed_annotations(self, expression: str, sample_values: int = 3) -> dict[str, dict[str, Any]]:
         tag = "bioclaw_observed_annotation"
-        rows = self.export(self._wrap(f"($annotation {expression} $value)"), f"({tag} $annotation $value)")
+        rows = self.export(f"($annotation {expression} $value)", f"({tag} $annotation $value)")
         observed: dict[str, dict[str, Any]] = {}
         for annotation, value in self._parse_annotation_rows(rows, tag):
             entry = observed.setdefault(annotation, {"count": 0, "sample_values": []})
@@ -121,6 +215,100 @@ class MorkClient:
             self.enrich_packet_nodes(packet, schema)
             for packet in neighborhood.packets
         ])
+
+    @staticmethod
+    def _normalize_entity_name(name: str, registry: SchemaRegistry | None = None) -> str:
+        text = str(name).strip().strip('"').strip("'").strip()
+        text = re.sub(r"\s+", " ", text)
+        if registry is None:
+            return text
+        labels: list[str] = []
+        for node in registry.nodes:
+            labels.extend([node.label, node.name])
+        if labels:
+            alternatives = "|".join(re.escape(value.replace("_", " ")) for value in sorted(set(labels), key=len, reverse=True))
+            text = re.sub(rf"^(?:the\s+)?(?:{alternatives})\s+", "", text, flags=re.IGNORECASE)
+        return text.strip()
+
+    @classmethod
+    def _entity_name_candidates(cls, name: str, registry: SchemaRegistry | None = None) -> list[str]:
+        text = cls._normalize_entity_name(name, registry)
+        candidates = [text, text.upper(), text.lower()]
+        normalized = text.replace(" ", "_")
+        candidates.extend([normalized, normalized.upper(), normalized.lower()])
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in seen:
+                ordered.append(candidate)
+                seen.add(candidate)
+        return ordered
+
+    @staticmethod
+    def _looks_like_raw_identifier(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text or " " in text:
+            return False
+        return bool(re.search(r"\d", text) or ":" in text)
+
+    @staticmethod
+    def _parse_resolve_rows(rows: list[str], tag: str, allowed_labels: set[str]) -> list[EntityRef]:
+        out: list[EntityRef] = []
+        prefix = f"({tag} "
+        for row in rows:
+            if not (row.startswith(prefix) and row.endswith(")")):
+                continue
+            body = row[len(prefix) : -1].strip()
+            parts = body.split()
+            if len(parts) < 2:
+                continue
+            label, identifier = parts[0], parts[1]
+            if label not in allowed_labels:
+                continue
+            out.append(EntityRef(label, identifier))
+        return out
+
+    def resolve_entity(
+        self,
+        name: str,
+        registry: SchemaRegistry,
+        label: str | None = None,
+    ) -> EntityRef | None:
+        allowed_labels = {node.label for node in registry.nodes}
+        label = (registry.node_label_for_type(label) or label) if label else None
+        if label and label not in allowed_labels:
+            allowed_labels.add(label)
+
+        if ":" in name:
+            parsed = EntityRef.parse(name)
+            if self.atom_exists(parsed.atom()):
+                return parsed
+            return self.resolve_entity(parsed.identifier, registry, parsed.label)
+
+        if label and self._looks_like_raw_identifier(name):
+            candidate = EntityRef(label, name)
+            if self.atom_exists(candidate.atom()):
+                return candidate
+
+        name_properties = [prop for prop in registry.name_properties() if prop != "id"]
+        for candidate in self._entity_name_candidates(name, registry):
+            for prop in name_properties:
+                tag = f"bioclaw_resolve_{uuid4().hex[:10]}"
+                if label:
+                    rows = self.export(f"({prop} ({label} $eid) {candidate})", f"({tag} {label} $eid)")
+                else:
+                    rows = self.export(f"({prop} ($label $eid) {candidate})", f"({tag} $label $eid)")
+                resolved = self._parse_resolve_rows(rows, tag, allowed_labels)
+                if resolved:
+                    return resolved[0]
+
+        if self._looks_like_raw_identifier(name):
+            labels = [label] if label else sorted(allowed_labels)
+            for candidate_label in labels:
+                candidate = EntityRef(candidate_label, name)
+                if self.atom_exists(candidate.atom()):
+                    return candidate
+        return None
 
     def evidence_packet(
         self,
@@ -184,7 +372,7 @@ class MorkClient:
 
         for query_direction, pattern in queries:
             tag = f"bioclaw_neighbor_{query_direction}"
-            rows = self.export(self._wrap(pattern), f"({tag} $other_label $other_id)")
+            rows = self.export(pattern, f"({tag} $other_label $other_id)")
             for other_label, other_id in self._parse_neighbor_rows(rows, tag):
                 other = EntityRef(other_label, other_id)
                 if query_direction == "outgoing":
@@ -263,6 +451,17 @@ class MorkClient:
             trace["blocked_at_step"] = 0
             return trace
 
+        transform_tag = f"bioclaw_path_{uuid4().hex[:10]}"
+        transform_patterns: list[str] = []
+        node_templates: list[str] = []
+        for index, step in enumerate(schema_path.steps):
+            left = start.atom() if index == 0 else f"($p{index - 1}_label $p{index - 1}_id)"
+            right = f"($p{index}_label $p{index}_id)"
+            transform_patterns.append(f"({step.edge_label} {left} {right})")
+            node_templates.append(right)
+        transform_template = f"({transform_tag} {' '.join(node_templates)})"
+        transform_rows = self.transform(transform_patterns, transform_template) if transform_patterns else []
+
         partials: list[tuple[EntityRef, ...]] = [(start,)]
         for index, step in enumerate(schema_path.steps):
             next_label = node_labels[index + 1]
@@ -281,7 +480,7 @@ class MorkClient:
             for partial in partials:
                 current = partial[-1]
                 pattern = f"({step.edge_label} {current.atom()} ({next_label} $next_id))"
-                rows = self.export(self._wrap(pattern), f"({tag} $next_id)")
+                rows = self.export(pattern, f"({tag} $next_id)")
                 for values in self._parse_path_rows(rows, tag, 1):
                     next_entity = EntityRef(next_label, values[0])
                     expanded.append(partial + (next_entity,))
@@ -298,6 +497,11 @@ class MorkClient:
                 trace["blocked_at_step"] = index + 1
                 break
 
+        transform_instances = self._parse_transform_path_rows(transform_rows, transform_tag, node_labels, start, limit)
+        if transform_instances:
+            trace["instances"] = transform_instances
+            return trace
+
         trace["instances"] = [
             {
                 "nodes": [{"label": node.label, "id": node.identifier} for node in partial],
@@ -306,3 +510,38 @@ class MorkClient:
             for partial in partials[:limit]
         ]
         return trace
+
+    @staticmethod
+    def _parse_transform_path_rows(
+        rows: list[str],
+        tag: str,
+        node_labels: list[str],
+        start: EntityRef,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        instances: list[dict[str, Any]] = []
+        prefix = f"({tag}"
+        for row in rows:
+            if not (row.startswith(prefix) and row.endswith(")")):
+                continue
+            body = row[len(prefix) : -1].strip()
+            atoms = re.findall(r"\(([^()\s]+)\s+([^()]+?)\)", body)
+            if len(atoms) != len(node_labels) - 1:
+                continue
+            nodes = [start]
+            ok = True
+            for index, (label, identifier) in enumerate(atoms, start=1):
+                identifier = identifier.strip()
+                if label != node_labels[index]:
+                    ok = False
+                    break
+                nodes.append(EntityRef(label, identifier))
+            if not ok:
+                continue
+            instances.append({
+                "nodes": [{"label": node.label, "id": node.identifier} for node in nodes],
+                "path": " -> ".join(f"{node.label}:{node.identifier}" for node in nodes),
+            })
+            if len(instances) >= limit:
+                break
+        return instances
