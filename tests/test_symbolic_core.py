@@ -225,6 +225,23 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("context_present", assessment.labels)
         self.assertEqual(assessment.stv, (0.547, 0.547))
 
+    def test_evidence_code_policy_handles_score_missing_nd(self) -> None:
+        packet = EvidencePacket(
+            edge_type="involved_in",
+            source=EntityRef("gene", "ENSG00000154059"),
+            target=EntityRef("biological_process", "GO_0008150"),
+            exists=True,
+            annotations={"source": ["GOA"], "evidence": ["ND"]},
+            annotation_roles={"source": "source", "evidence": "evidence"},
+        )
+
+        assessment = packet_assessment(packet, load_policy("config/reasoning.yaml"))
+
+        self.assertIn("evidence_code_confidence", assessment.labels)
+        self.assertIn("needs_review", assessment.labels)
+        self.assertNotIn("actionable", assessment.labels)
+        self.assertEqual(assessment.stv, (0.5, 0.1))
+
     def test_property_audit_filters_shared_edge_label_by_observed_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             schema_path = Path(tmp) / "schema.yaml"

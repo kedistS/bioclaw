@@ -33,6 +33,7 @@ def load_policy(path: str | None) -> dict[str, Any]:
         "evidence_annotations": [],
         "reference_annotations": [],
         "context_annotations": [],
+        "evidence_code_stv": {},
     }
     if not path:
         return defaults
@@ -76,6 +77,22 @@ def _unique_role_values(packet: EvidencePacket, roles: list[str], fallback_names
     return sorted(set(values))
 
 
+def _evidence_code_stvs(evidence: list[str], policy: dict[str, Any]) -> list[tuple[float, float]]:
+    configured = policy.get("evidence_code_stv") or {}
+    stvs: list[tuple[float, float]] = []
+    for code in evidence:
+        raw = configured.get(str(code).upper()) or configured.get(str(code))
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            continue
+        try:
+            strength = max(0.0, min(1.0, float(raw[0])))
+            confidence = max(0.0, min(1.0, float(raw[1])))
+        except (TypeError, ValueError):
+            continue
+        stvs.append((strength, confidence))
+    return stvs
+
+
 def packet_assessment(packet: EvidencePacket, policy: dict[str, Any] | None = None) -> SymbolicAssessment:
     policy = policy or load_policy(None)
     labels: list[str] = []
@@ -105,6 +122,8 @@ def packet_assessment(packet: EvidencePacket, policy: dict[str, Any] | None = No
     else:
         labels.append("source_missing")
 
+    evidence_stvs = _evidence_code_stvs(evidence, policy)
+
     if scores:
         labels.append("scored")
         # Packet-local confidence combination. This is intentionally bounded and
@@ -112,6 +131,11 @@ def packet_assessment(packet: EvidencePacket, policy: dict[str, Any] | None = No
         # confidence without inventing new biological facts.
         confidence = 1.0 - prod(1.0 - score for score in scores)
         strength = max(scores)
+    elif evidence_stvs:
+        labels.append("score_missing")
+        labels.append("evidence_code_confidence")
+        strength = max(stv[0] for stv in evidence_stvs)
+        confidence = max(stv[1] for stv in evidence_stvs)
     else:
         labels.append("score_missing")
         strength, confidence = policy["default_stv"]
