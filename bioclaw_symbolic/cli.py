@@ -150,12 +150,14 @@ def _resolve_entity_arg(
 def cmd_edge(args: argparse.Namespace) -> int:
     client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
-    annotations = registry.edge_annotation_names(args.edge) if registry else []
-    annotation_roles = registry.edge_annotation_roles(args.edge) if registry else {}
+    source = _resolve_entity_arg(args.source, client, registry, args.source_type) if registry else EntityRef.parse(args.source)
+    target = _resolve_entity_arg(args.target, client, registry, args.target_type) if registry else EntityRef.parse(args.target)
+    annotations = registry.edge_annotation_names(args.edge, source.label, target.label) if registry else []
+    annotation_roles = registry.edge_annotation_roles(args.edge, source.label, target.label) if registry else {}
     packet = client.evidence_packet(
         edge_type=args.edge,
-        source=_resolve_entity_arg(args.source, client, registry) if registry else EntityRef.parse(args.source),
-        target=_resolve_entity_arg(args.target, client, registry) if registry else EntityRef.parse(args.target),
+        source=source,
+        target=target,
         annotations=annotations,
         annotation_roles=annotation_roles,
     )
@@ -176,9 +178,9 @@ def cmd_neighborhood(args: argparse.Namespace) -> int:
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
     if args.include_node_details and registry is None:
         raise ValueError("--schema is required with --include-node-details")
-    annotations = registry.edge_annotation_names(args.edge) if registry else []
-    annotation_roles = registry.edge_annotation_roles(args.edge) if registry else {}
-    focus = _resolve_entity_arg(args.entity, client, registry) if registry else EntityRef.parse(args.entity)
+    focus = _resolve_entity_arg(args.entity, client, registry, args.entity_type) if registry else EntityRef.parse(args.entity)
+    annotations = registry.edge_annotation_names_for_focus(args.edge, focus.label, args.direction) if registry else []
+    annotation_roles = registry.edge_annotation_roles_for_focus(args.edge, focus.label, args.direction) if registry else {}
     retrieval_limit = args.max_total if args.max_total is not None else args.limit
     raw_neighborhood = client.neighborhood(
         edge_type=args.edge,
@@ -229,9 +231,9 @@ def cmd_neighborhood(args: argparse.Namespace) -> int:
 def _retrieve_neighborhood(args: argparse.Namespace) -> tuple[Any, Any]:
     client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
-    annotations = registry.edge_annotation_names(args.edge)
-    annotation_roles = registry.edge_annotation_roles(args.edge)
-    focus = _resolve_entity_arg(args.entity, client, registry)
+    focus = _resolve_entity_arg(args.entity, client, registry, args.entity_type)
+    annotations = registry.edge_annotation_names_for_focus(args.edge, focus.label, args.direction)
+    annotation_roles = registry.edge_annotation_roles_for_focus(args.edge, focus.label, args.direction)
     retrieval_limit = args.max_total if args.max_total is not None else args.limit
     raw_neighborhood = client.neighborhood(
         edge_type=args.edge,
@@ -335,7 +337,7 @@ def cmd_schema_path(args: argparse.Namespace) -> int:
 def cmd_audit_properties(args: argparse.Namespace) -> int:
     client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
-    focus = _resolve_entity_arg(args.entity, client, registry)
+    focus = _resolve_entity_arg(args.entity, client, registry, args.entity_type)
     neighborhood = client.neighborhood(
         edge_type=args.edge,
         focus=focus,
@@ -364,8 +366,10 @@ def build_parser() -> argparse.ArgumentParser:
     edge.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
     edge.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
     edge.add_argument("--source", required=True, help="source entity as label:id, or a display name when --schema is supplied")
+    edge.add_argument("--source-type", help="optional schema/node label used to constrain source name resolution")
     edge.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     edge.add_argument("--target", required=True, help="target entity as label:id, or a display name when --schema is supplied")
+    edge.add_argument("--target-type", help="optional schema/node label used to constrain target name resolution")
     edge.add_argument("--timeout", type=int, default=30)
     edge.add_argument("--schema", help="BioCypher schema YAML, required for --include-node-details")
     edge.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
@@ -378,6 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
     neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
     neighborhood.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
     neighborhood.add_argument("--entity", required=True, help="focus entity as label:id, or a display name when --schema is supplied")
+    neighborhood.add_argument("--entity-type", help="optional schema/node label used to constrain entity name resolution")
     neighborhood.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     neighborhood.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
     neighborhood.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
@@ -400,6 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--schema", required=True, help="BioCypher schema YAML")
     report.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
     report.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
+    report.add_argument("--entity-type", help="optional schema/node label used to constrain entity name resolution")
     report.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     report.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
     report.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
@@ -434,6 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--schema", required=True, help="BioCypher schema YAML")
     audit.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
     audit.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
+    audit.add_argument("--entity-type", help="optional schema/node label used to constrain entity name resolution")
     audit.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
     audit.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
     audit.add_argument("--max-total", type=int, default=100, help="maximum candidate edges to audit")

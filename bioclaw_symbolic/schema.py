@@ -195,18 +195,89 @@ class SchemaRegistry:
                 nodes.append(NodeCapability(name=name, label=label, properties=tuple(capabilities)))
         return cls(edges=edges, nodes=nodes)
 
-    def by_label(self, label: str) -> list[EdgeCapability]:
-        return [edge for edge in self.edges if edge.label == label or edge.name == label]
+    @staticmethod
+    def _normalize_label(value: Any) -> str:
+        return str(value).replace(" ", "_").lower()
 
-    def edge_annotation_names(self, label: str) -> list[str]:
+    def _edge_endpoint_labels(self, value: Any) -> set[str]:
+        raw_values = value if isinstance(value, list) else [value]
+        labels: set[str] = set()
+        for raw in raw_values:
+            if raw is None:
+                continue
+            node_label = self.node_label_for_type(str(raw)) or str(raw)
+            labels.add(self._normalize_label(node_label))
+        return labels
+
+    def by_label(
+        self,
+        label: str,
+        source_label: str | None = None,
+        target_label: str | None = None,
+    ) -> list[EdgeCapability]:
+        source_norm = self._normalize_label(source_label) if source_label else None
+        target_norm = self._normalize_label(target_label) if target_label else None
+        matches: list[EdgeCapability] = []
+        for edge in self.edges:
+            if edge.label != label and edge.name != label:
+                continue
+            if source_norm and source_norm not in self._edge_endpoint_labels(edge.source):
+                continue
+            if target_norm and target_norm not in self._edge_endpoint_labels(edge.target):
+                continue
+            matches.append(edge)
+        return matches
+
+    def by_label_for_focus(
+        self,
+        label: str,
+        focus_label: str,
+        direction: str,
+    ) -> list[EdgeCapability]:
+        if direction == "outgoing":
+            return self.by_label(label, source_label=focus_label)
+        if direction == "incoming":
+            return self.by_label(label, target_label=focus_label)
+        focus_norm = self._normalize_label(focus_label)
+        return [
+            edge
+            for edge in self.by_label(label)
+            if focus_norm in self._edge_endpoint_labels(edge.source)
+            or focus_norm in self._edge_endpoint_labels(edge.target)
+        ]
+
+    def edge_annotation_names(
+        self,
+        label: str,
+        source_label: str | None = None,
+        target_label: str | None = None,
+    ) -> list[str]:
         names: set[str] = set()
-        for edge in self.by_label(label):
+        for edge in self.by_label(label, source_label=source_label, target_label=target_label):
             names.update(prop.name for prop in edge.properties)
         return sorted(names)
 
-    def edge_annotation_roles(self, label: str) -> dict[str, str]:
+    def edge_annotation_roles(
+        self,
+        label: str,
+        source_label: str | None = None,
+        target_label: str | None = None,
+    ) -> dict[str, str]:
         roles: dict[str, str] = {}
-        for edge in self.by_label(label):
+        for edge in self.by_label(label, source_label=source_label, target_label=target_label):
+            for prop in edge.properties:
+                roles[prop.name] = prop.role
+        return dict(sorted(roles.items()))
+
+    def edge_annotation_names_for_focus(self, label: str, focus_label: str, direction: str) -> list[str]:
+        names: set[str] = set()
+        for edge in self.by_label_for_focus(label, focus_label, direction):
+            names.update(prop.name for prop in edge.properties)
+        return sorted(names)
+
+    def edge_annotation_roles_for_focus(self, label: str, focus_label: str, direction: str) -> dict[str, str]:
+        roles: dict[str, str] = {}
+        for edge in self.by_label_for_focus(label, focus_label, direction):
             for prop in edge.properties:
                 roles[prop.name] = prop.role
         return dict(sorted(roles.items()))

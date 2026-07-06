@@ -5,7 +5,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from bioclaw_symbolic.evidence import EntityRef, EvidencePacket
+from bioclaw_symbolic.audit import property_audit
+from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPacket
 from bioclaw_symbolic.mork import MorkClient
 from bioclaw_symbolic.reasoning import load_policy, packet_assessment
 from bioclaw_symbolic.schema import SchemaRegistry
@@ -223,6 +224,72 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("reference_present", assessment.labels)
         self.assertIn("context_present", assessment.labels)
         self.assertEqual(assessment.stv, (0.547, 0.547))
+
+    def test_property_audit_filters_shared_edge_label_by_observed_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schema_path = Path(tmp) / "schema.yaml"
+            policy_path = Path(tmp) / "roles.yaml"
+            schema_path.write_text(
+                textwrap.dedent(
+                    """
+                    gene:
+                      represented_as: node
+                      input_label: gene
+                    biological process:
+                      represented_as: node
+                      input_label: biological_process
+                    disease:
+                      represented_as: node
+                      input_label: disease
+                    biological process gene:
+                      represented_as: edge
+                      input_label: involved_in
+                      source: gene
+                      target: biological process
+                      properties:
+                        evidence:
+                          type: str
+                          biolink: has_evidence
+                    gene phenotype association:
+                      represented_as: edge
+                      input_label: involved_in
+                      source: gene
+                      target: disease
+                      properties:
+                        disease_id:
+                          type: str
+                    """
+                )
+            )
+            policy_path.write_text(
+                textwrap.dedent(
+                    """
+                    edge_property_roles:
+                      evidence:
+                        names: [evidence]
+                    """
+                )
+            )
+            registry = SchemaRegistry.from_file(schema_path, policy_path)
+
+        neighborhood = NeighborhoodPacket(
+            focus=EntityRef("gene", "ENSG00000154059"),
+            edge_type="involved_in",
+            packets=[
+                EvidencePacket(
+                    edge_type="involved_in",
+                    source=EntityRef("gene", "ENSG00000154059"),
+                    target=EntityRef("biological_process", "GO_0000001"),
+                    exists=True,
+                )
+            ],
+            limit=10,
+        )
+
+        audit = property_audit(neighborhood, registry, observed_annotations={"evidence": {"edge_count": 1}})
+
+        self.assertIn("evidence", audit.schema_properties)
+        self.assertNotIn("disease_id", audit.schema_properties)
 
 
 if __name__ == "__main__":

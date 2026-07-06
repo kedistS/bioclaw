@@ -39,9 +39,20 @@ class PropertyAudit:
         }
 
 
-def schema_edge_property_map(registry: SchemaRegistry, edge_type: str) -> dict[str, dict[str, Any]]:
+def schema_edge_property_map(
+    registry: SchemaRegistry,
+    edge_type: str,
+    observed_contracts: set[tuple[str, str]] | None = None,
+) -> dict[str, dict[str, Any]]:
     properties: dict[str, dict[str, Any]] = {}
-    for edge in registry.by_label(edge_type):
+    edges = registry.by_label(edge_type)
+    if observed_contracts:
+        filtered = []
+        for source_label, target_label in observed_contracts:
+            filtered.extend(registry.by_label(edge_type, source_label=source_label, target_label=target_label))
+        if filtered:
+            edges = filtered
+    for edge in edges:
         for prop in edge.properties:
             properties[prop.name] = {
                 "role": prop.role,
@@ -57,12 +68,16 @@ def property_audit(
     registry: SchemaRegistry,
     observed_annotations: dict[str, dict[str, Any]],
 ) -> PropertyAudit:
+    observed_contracts = {
+        (packet.source.label, packet.target.label)
+        for packet in neighborhood.packets
+    }
     return PropertyAudit(
         focus=neighborhood.focus,
         edge_type=neighborhood.edge_type,
         sampled_edges=len(neighborhood.packets),
         limit=neighborhood.limit,
         truncated=neighborhood.truncated,
-        schema_properties=schema_edge_property_map(registry, neighborhood.edge_type),
+        schema_properties=schema_edge_property_map(registry, neighborhood.edge_type, observed_contracts),
         observed_properties=dict(sorted(observed_annotations.items())),
     )

@@ -346,6 +346,11 @@ instead of hardcoding protein/gene/pathway property names in the code. Use
 `--schema-policy /path/to/schema_roles.yaml` to swap the policy for another
 atomspace.
 
+For display-name resolution, commands that take a focus entity also accept
+`--entity-type`; exact-edge extraction accepts `--source-type` and
+`--target-type`. Use these when a name could appear under multiple node classes,
+for example `--entity IMPACT --entity-type gene`.
+
 ## Audit Schema / Atomspace Alignment
 
 Because BioClaw is schema-driven, it can also find mismatches between what the
@@ -374,6 +379,11 @@ If MORK contains an annotation such as `pubmed_references` but the active schema
 does not declare it for the edge type, this command should report it as
 `missing_from_schema`. That should be fixed in the schema/adapter layer rather
 than patched into BioClaw Python code.
+
+When multiple schema edge definitions share the same MORK edge label, BioClaw
+filters schema properties by the observed source/target node labels in the
+retrieved packets. This avoids mixing unrelated properties from another schema
+contract that happens to use the same edge predicate.
 
 ## Plan Status
 
