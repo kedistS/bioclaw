@@ -71,6 +71,24 @@ def _candidate_pln_queries(packet: EvidencePacket, claim_id: str) -> list[str]:
     ]
 
 
+def revision_probe_program(first: tuple[float, float], second: tuple[float, float]) -> str:
+    return "\n".join(
+        [
+            "; BioClaw Phase 2 controlled OmegaClaw PLN probe.",
+            "; This does not use biological data; it verifies the local symbolic engine path.",
+            "!(import! &self (library OmegaClaw-Core lib_pln))",
+            "",
+            "; Direct PLN truth-value revision function.",
+            f"!(Truth__Revision (stv {first[0]:.6f} {first[1]:.6f}) (stv {second[0]:.6f} {second[1]:.6f}))",
+            "",
+            "; Same operation through OmegaClaw's PLN inference surface.",
+            "!(|~pln "
+            f"((Inheritance BioClawProbe Supported) (stv {first[0]:.6f} {first[1]:.6f})) "
+            f"((Inheritance BioClawProbe Supported) (stv {second[0]:.6f} {second[1]:.6f})))",
+        ]
+    ) + "\n"
+
+
 def metta_program_for_packet(
     packet: EvidencePacket,
     assessment: SymbolicAssessment,
@@ -188,6 +206,34 @@ def omega_spike_payload(
             "notes": [
                 "This payload is grounded in the extracted MORK packet.",
                 "The packet-local assessment remains an interim Python heuristic unless engine.status is completed.",
+            ],
+        },
+        "engine": _engine_status(program, invoke_engine, engine_command, timeout),
+    }
+    return OmegaClawSpikeResult(payload=payload, metta_program=program)
+
+
+def omega_revision_probe(
+    first: tuple[float, float] = (0.4, 0.4),
+    second: tuple[float, float] = (0.8, 0.8),
+    *,
+    invoke_engine: bool = False,
+    engine_command: str = "metta",
+    timeout: int = 30,
+) -> OmegaClawSpikeResult:
+    program = revision_probe_program(first, second)
+    payload = {
+        "phase": "phase_2_real_symbolic_substrate_spike",
+        "scope": "controlled OmegaClaw PLN revision probe",
+        "inputs": {
+            "first_stv": {"strength": first[0], "confidence": first[1]},
+            "second_stv": {"strength": second[0], "confidence": second[1]},
+        },
+        "omega_payload": {
+            "metta_program": program,
+            "notes": [
+                "This probe is intentionally synthetic.",
+                "It tests whether the real OmegaClaw/MeTTa PLN path can execute before BioClaw relies on it.",
             ],
         },
         "engine": _engine_status(program, invoke_engine, engine_command, timeout),

@@ -10,7 +10,7 @@ from typing import Any
 from .audit import property_audit
 from .evidence import EntityRef
 from .mork import MorkClient
-from .omegaclaw import omega_spike_payload
+from .omegaclaw import omega_revision_probe, omega_spike_payload
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import render_report, report_dict
 from .schema import SchemaRegistry
@@ -202,6 +202,42 @@ def cmd_omega_spike(args: argparse.Namespace) -> int:
         packet,
         policy,
         claim_id=args.claim_id,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if args.format == "metta":
+            target.write_text(result.metta_program)
+        else:
+            target.write_text(json.dumps(result.payload, indent=2, sort_keys=True) + "\n")
+    if args.format == "metta":
+        print(result.metta_program, end="")
+    else:
+        _print_json(result.payload)
+    return 0
+
+
+def _stv_arg(value: str) -> tuple[float, float]:
+    parts = value.split(",", 1)
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("STV must be strength,confidence")
+    try:
+        strength = float(parts[0])
+        confidence = float(parts[1])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("STV values must be numeric") from exc
+    if not (0.0 <= strength <= 1.0 and 0.0 <= confidence <= 1.0):
+        raise argparse.ArgumentTypeError("STV values must be in [0, 1]")
+    return strength, confidence
+
+
+def cmd_omega_probe(args: argparse.Namespace) -> int:
+    result = omega_revision_probe(
+        first=args.first_stv,
+        second=args.second_stv,
         invoke_engine=args.invoke_engine,
         engine_command=args.engine_command,
         timeout=args.engine_timeout,
@@ -445,6 +481,16 @@ def build_parser() -> argparse.ArgumentParser:
     omega.add_argument("--export", help="write the spike payload to a file")
     omega.add_argument("--format", choices=["json", "metta"], default="json", help="output/export format")
     omega.set_defaults(func=cmd_omega_spike)
+
+    omega_probe = sub.add_parser("omega-probe", help="run or export a controlled OmegaClaw PLN revision probe")
+    omega_probe.add_argument("--first-stv", type=_stv_arg, default=(0.4, 0.4), help="first STV as strength,confidence; default 0.4,0.4")
+    omega_probe.add_argument("--second-stv", type=_stv_arg, default=(0.8, 0.8), help="second STV as strength,confidence; default 0.8,0.8")
+    omega_probe.add_argument("--invoke-engine", action="store_true", help="try to execute the generated probe with the local MeTTa/OmegaClaw runtime")
+    omega_probe.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega_probe.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega_probe.add_argument("--export", help="write the probe payload to a file")
+    omega_probe.add_argument("--format", choices=["json", "metta"], default="json", help="output/export format")
+    omega_probe.set_defaults(func=cmd_omega_probe)
 
     neighborhood = sub.add_parser("neighborhood", help="extract incident edge evidence packets from MORK")
     neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")

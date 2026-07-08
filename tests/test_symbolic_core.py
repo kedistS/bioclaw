@@ -8,7 +8,7 @@ from pathlib import Path
 from bioclaw_symbolic.audit import property_audit
 from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPacket
 from bioclaw_symbolic.mork import MorkClient
-from bioclaw_symbolic.omegaclaw import omega_spike_payload
+from bioclaw_symbolic.omegaclaw import omega_revision_probe, omega_spike_payload
 from bioclaw_symbolic.reasoning import load_policy, packet_assessment
 from bioclaw_symbolic.schema import SchemaRegistry
 from bioclaw_symbolic.schema_path import find_schema_paths
@@ -351,6 +351,14 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("|~pln", query_text)
         self.assertIn("(stv 0.400000 0.400000)", query_text)
         self.assertIn("(stv 0.800000 0.800000)", query_text)
+
+    def test_omega_revision_probe_contains_direct_and_inference_surfaces(self) -> None:
+        result = omega_revision_probe()
+
+        self.assertIn("Truth__Revision", result.metta_program)
+        self.assertIn("|~pln", result.metta_program)
+        self.assertEqual(result.payload["scope"], "controlled OmegaClaw PLN revision probe")
+        self.assertEqual(result.payload["engine"]["status"], "not_requested")
 
 
 if __name__ == "__main__":
