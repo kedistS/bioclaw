@@ -8,6 +8,7 @@ from pathlib import Path
 from bioclaw_symbolic.audit import property_audit
 from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPacket
 from bioclaw_symbolic.mork import MorkClient
+from bioclaw_symbolic.omegaclaw import omega_spike_payload
 from bioclaw_symbolic.reasoning import load_policy, packet_assessment
 from bioclaw_symbolic.schema import SchemaRegistry
 from bioclaw_symbolic.schema_path import find_schema_paths
@@ -307,6 +308,49 @@ class SymbolicCoreTests(unittest.TestCase):
 
         self.assertIn("evidence", audit.schema_properties)
         self.assertNotIn("disease_id", audit.schema_properties)
+
+    def test_omega_spike_payload_is_grounded_and_not_claimed_as_real_pln_by_default(self) -> None:
+        packet = EvidencePacket(
+            edge_type="interacts_with",
+            source=EntityRef("protein", "P20645"),
+            target=EntityRef("protein", "P51151"),
+            exists=True,
+            annotations={
+                "source": ["STRING", "Reactome"],
+                "score": ["0.547"],
+                "source_url": ["https://string-db.org/", "https://reactome.org/"],
+            },
+            annotation_roles={
+                "source": "source",
+                "score": "score",
+                "source_url": "reference",
+            },
+        )
+
+        result = omega_spike_payload(packet, load_policy("config/reasoning.yaml"), claim_id="claim_test")
+
+        self.assertIn("(bioclaw_claim claim_test (interacts_with (protein P20645) (protein P51151)))", result.metta_program)
+        self.assertIn("(bioclaw_stv claim_test (stv 0.547000 0.547000))", result.metta_program)
+        self.assertIn('(bioclaw_annotation claim_test "source" "source" "STRING")', result.metta_program)
+        self.assertEqual(result.payload["engine"]["status"], "not_requested")
+        self.assertEqual(result.payload["omega_payload"]["candidate_pln_queries"], [])
+
+    def test_omega_spike_generates_pln_revision_candidate_for_comparable_scores(self) -> None:
+        packet = EvidencePacket(
+            edge_type="interacts_with",
+            source=EntityRef("protein", "P20645"),
+            target=EntityRef("protein", "P51151"),
+            exists=True,
+            annotations={"score": ["0.4", "0.8"]},
+            annotation_roles={"score": "score"},
+        )
+
+        result = omega_spike_payload(packet, load_policy("config/reasoning.yaml"), claim_id="claim_test")
+
+        query_text = "\n".join(result.payload["omega_payload"]["candidate_pln_queries"])
+        self.assertIn("|~pln", query_text)
+        self.assertIn("(stv 0.400000 0.400000)", query_text)
+        self.assertIn("(stv 0.800000 0.800000)", query_text)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from typing import Any
 from .audit import property_audit
 from .evidence import EntityRef
 from .mork import MorkClient
+from .omegaclaw import omega_spike_payload
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import render_report, report_dict
 from .schema import SchemaRegistry
@@ -170,6 +171,52 @@ def cmd_edge(args: argparse.Namespace) -> int:
         policy = load_policy(args.reasoning)
         data["assessment"] = packet_assessment(packet, policy).to_dict()
     _print_json(data)
+    return 0
+
+
+def _exact_packet_from_args(args: argparse.Namespace):
+    client = _client(args)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy) if args.schema else None
+    source = _resolve_entity_arg(args.source, client, registry, args.source_type) if registry else EntityRef.parse(args.source)
+    target = _resolve_entity_arg(args.target, client, registry, args.target_type) if registry else EntityRef.parse(args.target)
+    annotations = registry.edge_annotation_names(args.edge, source.label, target.label) if registry else []
+    annotation_roles = registry.edge_annotation_roles(args.edge, source.label, target.label) if registry else {}
+    packet = client.evidence_packet(
+        edge_type=args.edge,
+        source=source,
+        target=target,
+        annotations=annotations,
+        annotation_roles=annotation_roles,
+    )
+    if args.include_node_details:
+        if registry is None:
+            raise ValueError("--schema is required with --include-node-details")
+        packet = client.enrich_packet_nodes(packet, registry)
+    return packet
+
+
+def cmd_omega_spike(args: argparse.Namespace) -> int:
+    packet = _exact_packet_from_args(args)
+    policy = load_policy(args.reasoning)
+    result = omega_spike_payload(
+        packet,
+        policy,
+        claim_id=args.claim_id,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if args.format == "metta":
+            target.write_text(result.metta_program)
+        else:
+            target.write_text(json.dumps(result.payload, indent=2, sort_keys=True) + "\n")
+    if args.format == "metta":
+        print(result.metta_program, end="")
+    else:
+        _print_json(result.payload)
     return 0
 
 
@@ -377,6 +424,27 @@ def build_parser() -> argparse.ArgumentParser:
     edge.add_argument("--reason", action="store_true", help="add bounded symbolic assessment")
     edge.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     edge.set_defaults(func=cmd_edge)
+
+    omega = sub.add_parser("omega-spike", help="marshal one MORK packet into an OmegaClaw MeTTa/STV spike payload")
+    omega.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    omega.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    omega.add_argument("--source", required=True, help="source entity as label:id, or a display name when --schema is supplied")
+    omega.add_argument("--source-type", help="optional schema/node label used to constrain source name resolution")
+    omega.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    omega.add_argument("--target", required=True, help="target entity as label:id, or a display name when --schema is supplied")
+    omega.add_argument("--target-type", help="optional schema/node label used to constrain target name resolution")
+    omega.add_argument("--timeout", type=int, default=30)
+    omega.add_argument("--schema", help="BioCypher schema YAML, required for --include-node-details")
+    omega.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    omega.add_argument("--include-node-details", action="store_true", help="enrich source/target nodes using schema-selected node properties")
+    omega.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    omega.add_argument("--claim-id", help="optional MeTTa claim id")
+    omega.add_argument("--invoke-engine", action="store_true", help="try to execute the generated payload with the local MeTTa/OmegaClaw runtime")
+    omega.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega.add_argument("--export", help="write the spike payload to a file")
+    omega.add_argument("--format", choices=["json", "metta"], default="json", help="output/export format")
+    omega.set_defaults(func=cmd_omega_spike)
 
     neighborhood = sub.add_parser("neighborhood", help="extract incident edge evidence packets from MORK")
     neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
