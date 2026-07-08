@@ -23,6 +23,14 @@ def _print_json(data: Any) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
 
 
+def _omega_output_text(result, output_format: str) -> str:
+    if output_format == "metta":
+        return result.metta_program
+    if output_format == "skill":
+        return result.payload["omega_payload"]["omega_skill_call"]
+    return json.dumps(result.payload, indent=2, sort_keys=True) + "\n"
+
+
 def _packet_assessments_by_edge(neighborhood, policy: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     if policy is None:
         return {}
@@ -209,12 +217,9 @@ def cmd_omega_spike(args: argparse.Namespace) -> int:
     if args.export:
         target = Path(args.export)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if args.format == "metta":
-            target.write_text(result.metta_program)
-        else:
-            target.write_text(json.dumps(result.payload, indent=2, sort_keys=True) + "\n")
-    if args.format == "metta":
-        print(result.metta_program, end="")
+        target.write_text(_omega_output_text(result, args.format))
+    if args.format in {"metta", "skill"}:
+        print(_omega_output_text(result, args.format), end="")
     else:
         _print_json(result.payload)
     return 0
@@ -245,12 +250,9 @@ def cmd_omega_probe(args: argparse.Namespace) -> int:
     if args.export:
         target = Path(args.export)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if args.format == "metta":
-            target.write_text(result.metta_program)
-        else:
-            target.write_text(json.dumps(result.payload, indent=2, sort_keys=True) + "\n")
-    if args.format == "metta":
-        print(result.metta_program, end="")
+        target.write_text(_omega_output_text(result, args.format))
+    if args.format in {"metta", "skill"}:
+        print(_omega_output_text(result, args.format), end="")
     else:
         _print_json(result.payload)
     return 0
@@ -479,7 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     omega.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
     omega.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
     omega.add_argument("--export", help="write the spike payload to a file")
-    omega.add_argument("--format", choices=["json", "metta"], default="json", help="output/export format")
+    omega.add_argument("--format", choices=["json", "metta", "skill"], default="json", help="output/export format")
     omega.set_defaults(func=cmd_omega_spike)
 
     omega_probe = sub.add_parser("omega-probe", help="run or export a controlled OmegaClaw PLN revision probe")
@@ -489,7 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
     omega_probe.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
     omega_probe.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
     omega_probe.add_argument("--export", help="write the probe payload to a file")
-    omega_probe.add_argument("--format", choices=["json", "metta"], default="json", help="output/export format")
+    omega_probe.add_argument("--format", choices=["json", "metta", "skill"], default="json", help="output/export format")
     omega_probe.set_defaults(func=cmd_omega_probe)
 
     neighborhood = sub.add_parser("neighborhood", help="extract incident edge evidence packets from MORK")

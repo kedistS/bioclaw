@@ -67,8 +67,32 @@ def _candidate_pln_queries(packet: EvidencePacket, claim_id: str) -> list[str]:
     right = f"({term} (stv {stvs[1][0]:.6f} {stvs[1][1]:.6f}))"
     return [
         f"; PLN revision candidate for {claim_id}: two comparable score/confidence values were observed.",
-        f"!(|~pln {left} {right})",
+        f"!(|~ {left} {right})",
     ]
+
+
+def _skill_call(expression: str) -> str:
+    return f"(metta {_metta_string(expression)})"
+
+
+def _skill_tuple(expressions: list[str]) -> str:
+    if not expressions:
+        return "; No OmegaClaw (metta ...) skill call generated for this payload.\n"
+    return "(" + " ".join(_skill_call(expression) for expression in expressions) + ")\n"
+
+
+def packet_skill_expressions(packet: EvidencePacket) -> list[str]:
+    stvs = _numeric_stvs(packet)
+    if len(stvs) < 2:
+        return []
+    term = packet.edge_atom
+    left = f"({term} (stv {stvs[0][0]:.6f} {stvs[0][1]:.6f}))"
+    right = f"({term} (stv {stvs[1][0]:.6f} {stvs[1][1]:.6f}))"
+    return [f"(|~ {left} {right})"]
+
+
+def omegaclaw_skill_payload(expressions: list[str]) -> str:
+    return _skill_tuple(expressions)
 
 
 def revision_probe_program(first: tuple[float, float], second: tuple[float, float]) -> str:
@@ -82,11 +106,20 @@ def revision_probe_program(first: tuple[float, float], second: tuple[float, floa
             f"!(Truth__Revision (stv {first[0]:.6f} {first[1]:.6f}) (stv {second[0]:.6f} {second[1]:.6f}))",
             "",
             "; Same operation through OmegaClaw's PLN inference surface.",
-            "!(|~pln "
+            "!(|~ "
             f"((Inheritance BioClawProbe Supported) (stv {first[0]:.6f} {first[1]:.6f})) "
             f"((Inheritance BioClawProbe Supported) (stv {second[0]:.6f} {second[1]:.6f})))",
         ]
     ) + "\n"
+
+
+def revision_probe_skill_expressions(first: tuple[float, float], second: tuple[float, float]) -> list[str]:
+    return [
+        f"(Truth__Revision (stv {first[0]:.6f} {first[1]:.6f}) (stv {second[0]:.6f} {second[1]:.6f}))",
+        "(|~ "
+        f"((Inheritance BioClawProbe Supported) (stv {first[0]:.6f} {first[1]:.6f})) "
+        f"((Inheritance BioClawProbe Supported) (stv {second[0]:.6f} {second[1]:.6f})))",
+    ]
 
 
 def metta_program_for_packet(
@@ -203,9 +236,11 @@ def omega_spike_payload(
             "claim_id": resolved_claim_id,
             "metta_program": program,
             "candidate_pln_queries": _candidate_pln_queries(packet, resolved_claim_id),
+            "omega_skill_call": omegaclaw_skill_payload(packet_skill_expressions(packet)),
             "notes": [
                 "This payload is grounded in the extracted MORK packet.",
-                "The packet-local assessment remains an interim Python heuristic unless engine.status is completed.",
+                "The OmegaClaw-native execution surface is the in-process (metta ...) skill.",
+                "The packet-local assessment remains an interim Python heuristic unless an OmegaClaw skill call is executed by the agent loop.",
             ],
         },
         "engine": _engine_status(program, invoke_engine, engine_command, timeout),
@@ -222,6 +257,7 @@ def omega_revision_probe(
     timeout: int = 30,
 ) -> OmegaClawSpikeResult:
     program = revision_probe_program(first, second)
+    skill_call = omegaclaw_skill_payload(revision_probe_skill_expressions(first, second))
     payload = {
         "phase": "phase_2_real_symbolic_substrate_spike",
         "scope": "controlled OmegaClaw PLN revision probe",
@@ -231,9 +267,10 @@ def omega_revision_probe(
         },
         "omega_payload": {
             "metta_program": program,
+            "omega_skill_call": skill_call,
             "notes": [
                 "This probe is intentionally synthetic.",
-                "It tests whether the real OmegaClaw/MeTTa PLN path can execute before BioClaw relies on it.",
+                "It tests whether the real OmegaClaw (metta ...) PLN skill path can execute before BioClaw relies on it.",
             ],
         },
         "engine": _engine_status(program, invoke_engine, engine_command, timeout),

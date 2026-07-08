@@ -348,15 +348,18 @@ class SymbolicCoreTests(unittest.TestCase):
         result = omega_spike_payload(packet, load_policy("config/reasoning.yaml"), claim_id="claim_test")
 
         query_text = "\n".join(result.payload["omega_payload"]["candidate_pln_queries"])
-        self.assertIn("|~pln", query_text)
+        self.assertIn("|~", query_text)
         self.assertIn("(stv 0.400000 0.400000)", query_text)
         self.assertIn("(stv 0.800000 0.800000)", query_text)
+        self.assertIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
 
     def test_omega_revision_probe_contains_direct_and_inference_surfaces(self) -> None:
         result = omega_revision_probe()
 
         self.assertIn("Truth__Revision", result.metta_program)
-        self.assertIn("|~pln", result.metta_program)
+        self.assertIn("|~", result.metta_program)
+        self.assertIn('(metta "(Truth__Revision', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
         self.assertEqual(result.payload["scope"], "controlled OmegaClaw PLN revision probe")
         self.assertEqual(result.payload["engine"]["status"], "not_requested")
 
