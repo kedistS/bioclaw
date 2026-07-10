@@ -95,23 +95,6 @@ def omegaclaw_skill_payload(expressions: list[str]) -> str:
     return _skill_tuple(expressions)
 
 
-def omegaclaw_oneshot_program(expressions: list[str]) -> str:
-    lines = [
-        "; BioClaw Phase 2 one-shot OmegaClaw symbolic probe.",
-        "; Run from the PeTTa root with: sh run.sh <this-file>",
-        "; This imports OmegaClaw, then explicitly evals the symbolic expressions.",
-        "; The separate --format skill output still emits the agent-loop (metta ...) payload.",
-        "!(import! &self (library lib_import))",
-        "!(import! &self (library OmegaClaw-Core lib_omegaclaw))",
-        "",
-    ]
-    if not expressions:
-        lines.append("; No OmegaClaw symbolic expression generated for this payload.")
-    for expression in expressions:
-        lines.append(f"!(eval {expression})")
-    return "\n".join(lines) + "\n"
-
-
 def revision_probe_program(first: tuple[float, float], second: tuple[float, float]) -> str:
     return "\n".join(
         [
@@ -254,10 +237,10 @@ def omega_spike_payload(
             "metta_program": program,
             "candidate_pln_queries": _candidate_pln_queries(packet, resolved_claim_id),
             "omega_skill_call": omegaclaw_skill_payload(packet_skill_expressions(packet)),
-            "omega_oneshot_program": omegaclaw_oneshot_program(packet_skill_expressions(packet)),
             "notes": [
                 "This payload is grounded in the extracted MORK packet.",
                 "The OmegaClaw-native execution surface is the in-process (metta ...) skill.",
+                "Run this through the OmegaClaw agent loop or mock-loop harness; run.sh one-shot files do not exercise skill dispatch.",
                 "The packet-local assessment remains an interim Python heuristic unless an OmegaClaw skill call is executed by the agent loop.",
             ],
         },
@@ -286,10 +269,10 @@ def omega_revision_probe(
         "omega_payload": {
             "metta_program": program,
             "omega_skill_call": skill_call,
-            "omega_oneshot_program": omegaclaw_oneshot_program(revision_probe_skill_expressions(first, second)),
             "notes": [
                 "This probe is intentionally synthetic.",
                 "It tests whether the real OmegaClaw (metta ...) PLN skill path can execute before BioClaw relies on it.",
+                "Run this through the OmegaClaw agent loop or mock-loop harness; run.sh one-shot files do not exercise skill dispatch.",
             ],
         },
         "engine": _engine_status(program, invoke_engine, engine_command, timeout),

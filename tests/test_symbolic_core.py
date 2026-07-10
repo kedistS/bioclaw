@@ -360,9 +360,7 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("|~", result.metta_program)
         self.assertIn('(metta "(Truth__Revision', result.payload["omega_payload"]["omega_skill_call"])
         self.assertIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
-        self.assertIn("lib_omegaclaw", result.payload["omega_payload"]["omega_oneshot_program"])
-        self.assertIn("!(eval (Truth__Revision", result.payload["omega_payload"]["omega_oneshot_program"])
-        self.assertIn("!(eval (|~", result.payload["omega_payload"]["omega_oneshot_program"])
+        self.assertNotIn("omega_oneshot_program", result.payload["omega_payload"])
         self.assertEqual(result.payload["scope"], "controlled OmegaClaw PLN revision probe")
         self.assertEqual(result.payload["engine"]["status"], "not_requested")
 
