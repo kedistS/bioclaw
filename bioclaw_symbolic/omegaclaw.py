@@ -99,7 +99,7 @@ def omegaclaw_oneshot_program(expressions: list[str]) -> str:
     lines = [
         "; BioClaw Phase 2 one-shot OmegaClaw symbolic probe.",
         "; Run from the PeTTa root with: sh run.sh <this-file>",
-        "; This imports OmegaClaw, then evaluates the symbolic expressions directly.",
+        "; This imports OmegaClaw, then explicitly evals the symbolic expressions.",
         "; The separate --format skill output still emits the agent-loop (metta ...) payload.",
         "!(import! &self (library lib_import))",
         "!(import! &self (library OmegaClaw-Core lib_omegaclaw))",
@@ -108,7 +108,7 @@ def omegaclaw_oneshot_program(expressions: list[str]) -> str:
     if not expressions:
         lines.append("; No OmegaClaw symbolic expression generated for this payload.")
     for expression in expressions:
-        lines.append(f"!{expression}")
+        lines.append(f"!(eval {expression})")
     return "\n".join(lines) + "\n"
 
 
