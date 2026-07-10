@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import textwrap
 import unittest
+import py_compile
 from pathlib import Path
 
 from bioclaw_symbolic.audit import property_audit
@@ -412,6 +413,10 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("0.547000", output)
         self.assertIn("PLN_EXPECTED = False", output)
         self.assertIn("packet PLN skipped", output)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_bioclaw_omegaclaw_packet_mock.py"
+            path.write_text(output)
+            py_compile.compile(str(path), doraise=True)
 
 
 if __name__ == "__main__":

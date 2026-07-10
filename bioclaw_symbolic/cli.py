@@ -220,6 +220,9 @@ def cmd_omega_spike(args: argparse.Namespace) -> int:
         target = Path(args.export)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
     if args.format in {"metta", "skill", "mock-test"}:
         print(_omega_output_text(result, args.format), end="")
     else:
@@ -253,6 +256,9 @@ def cmd_omega_probe(args: argparse.Namespace) -> int:
         target = Path(args.export)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
     if args.format in {"metta", "skill", "mock-test"}:
         print(_omega_output_text(result, args.format), end="")
     else:
