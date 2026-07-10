@@ -99,8 +99,8 @@ def omegaclaw_oneshot_program(expressions: list[str]) -> str:
     lines = [
         "; BioClaw Phase 2 one-shot OmegaClaw skill runner.",
         "; Run from the PeTTa root with: sh run.sh <this-file>",
-        "; This imports OmegaClaw, then evaluates the same (metta ...) skill calls",
-        "; that the agent loop would dispatch.",
+        "; This imports OmegaClaw, then mirrors the loop dispatch:",
+        ";   (eval (metta \"...\"))",
         "!(import! &self (library lib_import))",
         "!(import! &self (library OmegaClaw-Core lib_omegaclaw))",
         "",
@@ -108,7 +108,7 @@ def omegaclaw_oneshot_program(expressions: list[str]) -> str:
     if not expressions:
         lines.append("; No OmegaClaw (metta ...) skill call generated for this payload.")
     for expression in expressions:
-        lines.append(f"!{_skill_call(expression)}")
+        lines.append(f"!(eval {_skill_call(expression)})")
     return "\n".join(lines) + "\n"
 
 
