@@ -334,6 +334,9 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn('(bioclaw_annotation claim_test "source" "source" "STRING")', result.metta_program)
         self.assertEqual(result.payload["engine"]["status"], "not_requested")
         self.assertEqual(result.payload["omega_payload"]["candidate_pln_queries"], [])
+        self.assertIn('(metta "(quote (bioclaw_claim', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn('(metta "(quote (bioclaw_stv', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertNotIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
 
     def test_omega_spike_generates_pln_revision_candidate_for_comparable_scores(self) -> None:
         packet = EvidencePacket(
@@ -377,6 +380,38 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn('response = SKILL_COMMANDS +', output)
         self.assertIn('arg_substr="Truth__Revision"', output)
         self.assertIn('"0.742" in logs and "0.823" in logs', output)
+
+    def test_omega_spike_mock_test_uses_real_packet_without_overclaiming_pln(self) -> None:
+        from bioclaw_symbolic.cli import _omega_output_text
+
+        packet = EvidencePacket(
+            edge_type="interacts_with",
+            source=EntityRef("protein", "P20645"),
+            target=EntityRef("protein", "P51151"),
+            exists=True,
+            annotations={
+                "source": ["STRING", "Reactome"],
+                "score": ["0.547"],
+                "source_url": ["https://string-db.org/", "https://reactome.org/"],
+            },
+            annotation_roles={
+                "source": "source",
+                "score": "score",
+                "source_url": "reference",
+            },
+        )
+
+        result = omega_spike_payload(packet, load_policy("config/reasoning.yaml"), claim_id="claim_test")
+        output = _omega_output_text(result, "mock-test")
+
+        self.assertIn("test_bioclaw_omegaclaw_packet_mock", output)
+        self.assertIn("bioclaw_claim", output)
+        self.assertIn("bioclaw_stv", output)
+        self.assertIn("P20645", output)
+        self.assertIn("P51151", output)
+        self.assertIn("0.547000", output)
+        self.assertIn("PLN_EXPECTED = False", output)
+        self.assertIn("packet PLN skipped", output)
 
 
 if __name__ == "__main__":

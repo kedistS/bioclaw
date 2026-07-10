@@ -91,13 +91,28 @@ def packet_skill_expressions(packet: EvidencePacket) -> list[str]:
     return [f"(|~ {left} {right})"]
 
 
+def packet_grounding_skill_expressions(
+    packet: EvidencePacket,
+    assessment: SymbolicAssessment,
+    claim_id: str,
+) -> list[str]:
+    return [f"(quote {line})" for line in _atom_lines(packet, assessment, claim_id)]
+
+
 def omegaclaw_skill_payload(expressions: list[str]) -> str:
     return _skill_tuple(expressions)
 
 
+def _skill_commands_from_payload(skill_payload: str) -> str:
+    stripped = skill_payload.strip()
+    if stripped.startswith("(") and stripped.endswith(")"):
+        return stripped[1:-1]
+    return stripped
+
+
 def omegaclaw_mock_pytest(expressions: list[str]) -> str:
     skill_payload = omegaclaw_skill_payload(expressions).strip()
-    skill_commands = skill_payload[1:-1] if skill_payload.startswith("(") and skill_payload.endswith(")") else skill_payload
+    skill_commands = _skill_commands_from_payload(skill_payload)
     return f'''"""
 BioClaw Phase 2 OmegaClaw mock-loop probe.
 
@@ -179,6 +194,130 @@ def test_bioclaw_omegaclaw_pln_probe_mock(llm, comm):
                 "0.742 and 0.823 in docker logs",
             )
         c.ok("revised STV visible", "found expected revised STV fragments in logs")
+
+        c.done()
+'''
+
+
+def omegaclaw_packet_mock_pytest(
+    packet: EvidencePacket,
+    assessment: SymbolicAssessment,
+    claim_id: str,
+) -> str:
+    expressions = [
+        *packet_grounding_skill_expressions(packet, assessment, claim_id),
+        *packet_skill_expressions(packet),
+    ]
+    skill_payload = omegaclaw_skill_payload(expressions).strip()
+    skill_commands = _skill_commands_from_payload(skill_payload)
+    stv_strength, stv_confidence = assessment.stv
+    log_fragments = [
+        "bioclaw_claim",
+        packet.edge_type,
+        packet.source.identifier,
+        packet.target.identifier,
+        f"{stv_strength:.6f}",
+        f"{stv_confidence:.6f}",
+    ]
+    needs_pln = bool(packet_skill_expressions(packet))
+    return f'''"""
+BioClaw Phase 2 OmegaClaw grounded-packet mock-loop probe.
+
+Copy this file into OmegaClaw-Core/Autotests/mock/ and run it with the
+existing OmegaClaw mock harness. It verifies that a real MORK BioAtomspace
+evidence packet is dispatched through OmegaClaw's native (metta ...) skill
+path. If the packet has fewer than two comparable score/confidence values,
+this test intentionally does not claim PLN revision occurred.
+"""
+import subprocess
+import time
+
+from helpers import CONTAINER, Checker, make_prompt, wait_for_skill_call
+
+
+SKILL_PAYLOAD = {skill_payload!r}
+SKILL_COMMANDS = {skill_commands!r}
+REQUIRED_LOG_FRAGMENTS = {log_fragments!r}
+PLN_EXPECTED = {needs_pln!r}
+
+
+def docker_logs():
+    res = subprocess.run(
+        ["docker", "logs", CONTAINER],
+        capture_output=True,
+        text=True,
+    )
+    return (res.stdout or "") + (res.stderr or "")
+
+
+def test_bioclaw_omegaclaw_packet_mock(llm, comm):
+    with Checker("BioClaw OmegaClaw grounded packet probe (mock)") as c:
+        print(f"\\n=== BioClaw: OmegaClaw grounded packet probe (run-id {{c.run_id}}) ===", flush=True)
+
+        marker = f"BIOCLAW-OMEGA-PACKET-{{c.run_id}}"
+        c.add_cleanup_marker(marker)
+
+        prompt = make_prompt(
+            c.run_id,
+            "Run the BioClaw grounded MORK evidence packet payload and acknowledge.",
+        )
+        response = SKILL_COMMANDS + f' (send "{{marker}} dispatched.")'
+        llm.set_answer(prompt, response)
+        if not comm.send_message(prompt):
+            c.fail("comm", "could not deliver prompt within 60s")
+        c.ok("comm", f"run-id={{c.run_id}}")
+
+        c.step("verify grounded claim metta call was dispatched")
+        claim_arg = wait_for_skill_call(
+            c.run_id,
+            "metta",
+            timeout=60,
+            arg_substr="bioclaw_claim",
+        )
+        if claim_arg is None:
+            c.fail("grounded claim dispatched", "no matching (metta ...) call observed")
+        c.ok("grounded claim dispatched", f"arg={{claim_arg[:140]!r}}")
+
+        c.step("verify grounded STV metta call was dispatched")
+        stv_arg = wait_for_skill_call(
+            c.run_id,
+            "metta",
+            timeout=60,
+            arg_substr="bioclaw_stv",
+        )
+        if stv_arg is None:
+            c.fail("grounded STV dispatched", "no matching (metta ...) call observed")
+        c.ok("grounded STV dispatched", f"arg={{stv_arg[:140]!r}}")
+
+        if PLN_EXPECTED:
+            c.step("verify packet PLN metta call was dispatched")
+            pln_arg = wait_for_skill_call(
+                c.run_id,
+                "metta",
+                timeout=60,
+                arg_substr="|~",
+            )
+            if pln_arg is None:
+                c.fail("packet PLN dispatched", "no matching (metta ...) call observed")
+            c.ok("packet PLN dispatched", f"arg={{pln_arg[:140]!r}}")
+        else:
+            c.ok(
+                "packet PLN skipped",
+                "fewer than two comparable score/confidence values were present",
+            )
+
+        c.step("verify grounded packet fragments are visible in OmegaClaw logs")
+        deadline = time.time() + 60
+        logs = ""
+        while time.time() < deadline:
+            logs = docker_logs()
+            if all(fragment in logs for fragment in REQUIRED_LOG_FRAGMENTS):
+                break
+            time.sleep(2)
+        missing = [fragment for fragment in REQUIRED_LOG_FRAGMENTS if fragment not in logs]
+        if missing:
+            c.fail("grounded packet visible", f"missing log fragments: {{missing!r}}")
+        c.ok("grounded packet visible", "found grounded edge and STV fragments in logs")
 
         c.done()
 '''
@@ -325,7 +464,13 @@ def omega_spike_payload(
             "claim_id": resolved_claim_id,
             "metta_program": program,
             "candidate_pln_queries": _candidate_pln_queries(packet, resolved_claim_id),
-            "omega_skill_call": omegaclaw_skill_payload(packet_skill_expressions(packet)),
+            "omega_skill_call": omegaclaw_skill_payload(
+                [
+                    *packet_grounding_skill_expressions(packet, assessment, resolved_claim_id),
+                    *packet_skill_expressions(packet),
+                ]
+            ),
+            "omega_mock_test": omegaclaw_packet_mock_pytest(packet, assessment, resolved_claim_id),
             "notes": [
                 "This payload is grounded in the extracted MORK packet.",
                 "The OmegaClaw-native execution surface is the in-process (metta ...) skill.",
@@ -358,6 +503,7 @@ def omega_revision_probe(
         "omega_payload": {
             "metta_program": program,
             "omega_skill_call": skill_call,
+            "omega_mock_test": omegaclaw_mock_pytest(revision_probe_skill_expressions(first, second)),
             "notes": [
                 "This probe is intentionally synthetic.",
                 "It tests whether the real OmegaClaw (metta ...) PLN skill path can execute before BioClaw relies on it.",
