@@ -372,7 +372,9 @@ class SymbolicCoreTests(unittest.TestCase):
 
         self.assertIn("test_bioclaw_omegaclaw_pln_probe_mock", output)
         self.assertIn('SKILL_PAYLOAD = ', output)
+        self.assertIn('SKILL_COMMANDS = ', output)
         self.assertIn('(metta "(Truth__Revision', output)
+        self.assertIn('response = SKILL_COMMANDS +', output)
         self.assertIn('arg_substr="Truth__Revision"', output)
         self.assertIn('"0.742" in logs and "0.823" in logs', output)
 

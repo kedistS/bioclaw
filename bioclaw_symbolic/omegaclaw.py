@@ -97,6 +97,7 @@ def omegaclaw_skill_payload(expressions: list[str]) -> str:
 
 def omegaclaw_mock_pytest(expressions: list[str]) -> str:
     skill_payload = omegaclaw_skill_payload(expressions).strip()
+    skill_commands = skill_payload[1:-1] if skill_payload.startswith("(") and skill_payload.endswith(")") else skill_payload
     return f'''"""
 BioClaw Phase 2 OmegaClaw mock-loop probe.
 
@@ -112,6 +113,7 @@ from helpers import CONTAINER, Checker, make_prompt, wait_for_skill_call
 
 
 SKILL_PAYLOAD = {skill_payload!r}
+SKILL_COMMANDS = {skill_commands!r}
 
 
 def docker_logs():
@@ -134,7 +136,7 @@ def test_bioclaw_omegaclaw_pln_probe_mock(llm, comm):
             c.run_id,
             "Run the BioClaw OmegaClaw PLN probe payload and acknowledge.",
         )
-        response = SKILL_PAYLOAD[:-1] + f' (send "{{marker}} dispatched."))'
+        response = SKILL_COMMANDS + f' (send "{{marker}} dispatched.")'
         llm.set_answer(prompt, response)
         if not comm.send_message(prompt):
             c.fail("comm", "could not deliver prompt within 60s")
