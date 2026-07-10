@@ -9,7 +9,7 @@ from pathlib import Path
 from bioclaw_symbolic.audit import property_audit
 from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPacket
 from bioclaw_symbolic.mork import MorkClient
-from bioclaw_symbolic.omegaclaw import omega_revision_probe, omega_spike_payload
+from bioclaw_symbolic.omegaclaw import omega_neighborhood_payload, omega_revision_probe, omega_spike_payload
 from bioclaw_symbolic.reasoning import load_policy, packet_assessment
 from bioclaw_symbolic.schema import SchemaRegistry
 from bioclaw_symbolic.schema_path import find_schema_paths
@@ -415,6 +415,65 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("packet PLN skipped", output)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test_bioclaw_omegaclaw_packet_mock.py"
+            path.write_text(output)
+            py_compile.compile(str(path), doraise=True)
+
+    def test_omega_neighborhood_payload_emits_ranked_curation_state_atoms(self) -> None:
+        from bioclaw_symbolic.cli import _omega_output_text
+
+        packets = [
+            EvidencePacket(
+                edge_type="interacts_with",
+                source=EntityRef("protein", "P20645"),
+                target=EntityRef("protein", "P51151"),
+                exists=True,
+                annotations={
+                    "source": ["STRING", "Reactome"],
+                    "score": ["0.547"],
+                    "source_url": ["https://string-db.org/", "https://reactome.org/"],
+                },
+                annotation_roles={
+                    "source": "source",
+                    "score": "score",
+                    "source_url": "reference",
+                },
+            ),
+            EvidencePacket(
+                edge_type="interacts_with",
+                source=EntityRef("protein", "P20645"),
+                target=EntityRef("protein", "Q99999"),
+                exists=True,
+                annotations={"source": ["STRING"], "score": ["0.2"]},
+                annotation_roles={"source": "source", "score": "score"},
+            ),
+        ]
+        neighborhood = NeighborhoodPacket(
+            focus=EntityRef("protein", "P20645"),
+            edge_type="interacts_with",
+            packets=packets,
+            limit=10,
+        )
+        result = omega_neighborhood_payload(
+            neighborhood,
+            neighborhood,
+            load_policy("config/reasoning.yaml"),
+            top=2,
+            neighborhood_id="neighborhood_test",
+        )
+
+        self.assertEqual(result.payload["scope"], "one bounded MORK relation neighborhood")
+        self.assertIn("bioclaw_neighborhood neighborhood_test", result.metta_program)
+        self.assertIn("bioclaw_ranked_claim neighborhood_test 1", result.metta_program)
+        self.assertIn("bioclaw_curation_state", result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn("multi_source", result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn("actionable", result.payload["omega_payload"]["omega_skill_call"])
+        output = _omega_output_text(result, "mock-test")
+        self.assertIn("test_bioclaw_omegaclaw_neighborhood_mock", output)
+        self.assertIn("bioclaw_neighborhood", output)
+        self.assertIn("bioclaw_ranked_claim", output)
+        self.assertIn("bioclaw_curation_state", output)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_bioclaw_omegaclaw_neighborhood_mock.py"
             path.write_text(output)
             py_compile.compile(str(path), doraise=True)
 

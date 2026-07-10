@@ -10,7 +10,7 @@ from typing import Any
 from .audit import property_audit
 from .evidence import EntityRef
 from .mork import MorkClient
-from .omegaclaw import omega_revision_probe, omega_spike_payload
+from .omegaclaw import omega_neighborhood_payload, omega_revision_probe, omega_spike_payload
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import render_report, report_dict
 from .schema import SchemaRegistry
@@ -354,6 +354,33 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_omega_neighborhood(args: argparse.Namespace) -> int:
+    raw_neighborhood, neighborhood = _retrieve_neighborhood(args)
+    policy = load_policy(args.reasoning)
+    result = omega_neighborhood_payload(
+        neighborhood,
+        raw_neighborhood,
+        policy,
+        top=args.top,
+        neighborhood_id=args.neighborhood_id,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
+    if args.format in {"metta", "skill", "mock-test"}:
+        print(_omega_output_text(result, args.format), end="")
+    else:
+        _print_json(result.payload)
+    return 0
+
+
 def cmd_schema_path(args: argparse.Namespace) -> int:
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
     client = _client(args) if args.mork else None
@@ -541,6 +568,30 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="report output format")
     report.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     report.set_defaults(func=cmd_report)
+
+    omega_neighborhood = sub.add_parser("omega-neighborhood", help="marshal a bounded neighborhood into OmegaClaw curation-state atoms")
+    omega_neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    omega_neighborhood.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    omega_neighborhood.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    omega_neighborhood.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    omega_neighborhood.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
+    omega_neighborhood.add_argument("--entity-type", help="optional schema/node label used to constrain entity name resolution")
+    omega_neighborhood.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    omega_neighborhood.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    omega_neighborhood.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
+    omega_neighborhood.add_argument("--max-total", type=int, help="maximum candidate edges to retrieve/process; overrides --limit")
+    omega_neighborhood.add_argument("--timeout", type=int, default=30)
+    omega_neighborhood.add_argument("--include-node-details", action="store_true", help="enrich source/target nodes using schema-selected node properties")
+    omega_neighborhood.add_argument("--only-multisource", action="store_true", help="include only edges with more than one source annotation")
+    omega_neighborhood.add_argument("--top", type=int, default=20, help="number of ranked edges to include in symbolic payload")
+    omega_neighborhood.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    omega_neighborhood.add_argument("--neighborhood-id", help="optional MeTTa neighborhood id")
+    omega_neighborhood.add_argument("--invoke-engine", action="store_true", help="try to execute the generated payload with the local MeTTa/OmegaClaw runtime")
+    omega_neighborhood.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega_neighborhood.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega_neighborhood.add_argument("--export", help="write the neighborhood OmegaClaw payload to a file")
+    omega_neighborhood.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
+    omega_neighborhood.set_defaults(func=cmd_omega_neighborhood)
 
     schema_path = sub.add_parser("schema-path", help="find schema-valid paths and optional MORK path instances")
     schema_path.add_argument("--schema", required=True, help="BioCypher schema YAML")

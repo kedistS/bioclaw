@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .evidence import EvidencePacket
+from .evidence import EvidencePacket, NeighborhoodPacket
 from .reasoning import SymbolicAssessment, packet_assessment
+from .report import ranked_packets, report_dict
 
 
 @dataclass(frozen=True)
@@ -323,6 +324,218 @@ def test_bioclaw_omegaclaw_packet_mock(llm, comm):
 '''
 
 
+def _neighborhood_id(neighborhood: NeighborhoodPacket) -> str:
+    return (
+        "neighborhood_"
+        f"{_safe_claim_id(neighborhood.focus.label)}_"
+        f"{_safe_claim_id(neighborhood.focus.identifier)}_"
+        f"{_safe_claim_id(neighborhood.edge_type)}"
+    )
+
+
+def neighborhood_skill_expressions(
+    neighborhood: NeighborhoodPacket,
+    policy: dict[str, Any],
+    *,
+    top: int = 20,
+    neighborhood_id: str | None = None,
+) -> list[str]:
+    resolved_id = neighborhood_id or _neighborhood_id(neighborhood)
+    ranked = ranked_packets(neighborhood, policy, top)
+    expressions = [
+        (
+            f"(quote (bioclaw_neighborhood {resolved_id} "
+            f"{neighborhood.focus.atom()} {_metta_string(neighborhood.edge_type)}))"
+        ),
+        (
+            f"(quote (bioclaw_neighborhood_total {resolved_id} "
+            f"{len(neighborhood.packets)}))"
+        ),
+        (
+            f"(quote (bioclaw_neighborhood_truncated {resolved_id} "
+            f"{_metta_string(str(bool(neighborhood.truncated)).lower())}))"
+        ),
+    ]
+    for source, count in neighborhood.source_counts().items():
+        expressions.append(
+            f"(quote (bioclaw_neighborhood_source_count {resolved_id} "
+            f"{_metta_string(source)} {count}))"
+        )
+    for item in ranked:
+        claim_id = (
+            f"{resolved_id}_rank_{item.rank}_"
+            f"{_safe_claim_id(item.packet.source.identifier)}_"
+            f"{_safe_claim_id(item.packet.target.identifier)}"
+        )
+        expressions.append(f"(quote (bioclaw_ranked_claim {resolved_id} {item.rank} {claim_id}))")
+        expressions.extend(packet_grounding_skill_expressions(item.packet, packet_assessment(item.packet, policy), claim_id))
+        for label in item.assessment.get("labels", []):
+            expressions.append(
+                f"(quote (bioclaw_curation_state {claim_id} {_metta_string(label)}))"
+            )
+    return expressions
+
+
+def metta_program_for_neighborhood(
+    neighborhood: NeighborhoodPacket,
+    raw_neighborhood: NeighborhoodPacket,
+    policy: dict[str, Any],
+    *,
+    top: int = 20,
+    neighborhood_id: str | None = None,
+) -> str:
+    resolved_id = neighborhood_id or _neighborhood_id(neighborhood)
+    lines = [
+        "; BioClaw Phase 2 bounded neighborhood symbolic payload.",
+        "; This payload is generated from a retrieved MORK BioAtomspace neighborhood.",
+        "!(import! &self (library OmegaClaw-Core lib_pln))",
+        "!(import! &self (library OmegaClaw-Core lib_nal))",
+        "",
+        f"; Candidate edges retrieved before filtering: {len(raw_neighborhood.packets)}",
+        f"; Ranked edges included: {min(top, len(neighborhood.packets))}",
+        "",
+    ]
+    for expression in neighborhood_skill_expressions(neighborhood, policy, top=top, neighborhood_id=resolved_id):
+        if expression.startswith("(quote ") and expression.endswith(")"):
+            lines.append(expression[len("(quote "):-1])
+        else:
+            lines.append(expression)
+    lines.extend(
+        [
+            "",
+            "; No global KG inference is requested here.",
+            "; These atoms are bounded curation-state inputs for OmegaClaw skill dispatch.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def omegaclaw_neighborhood_mock_pytest(
+    neighborhood: NeighborhoodPacket,
+    policy: dict[str, Any],
+    *,
+    top: int = 20,
+    neighborhood_id: str | None = None,
+) -> str:
+    resolved_id = neighborhood_id or _neighborhood_id(neighborhood)
+    expressions = neighborhood_skill_expressions(neighborhood, policy, top=top, neighborhood_id=resolved_id)
+    skill_payload = omegaclaw_skill_payload(expressions).strip()
+    skill_commands = _skill_commands_from_payload(skill_payload)
+    ranked = ranked_packets(neighborhood, policy, top)
+    required_fragments = [
+        "bioclaw_neighborhood",
+        resolved_id,
+        neighborhood.focus.identifier,
+        neighborhood.edge_type,
+    ]
+    if ranked:
+        first = ranked[0]
+        required_fragments.extend(
+            [
+                "bioclaw_ranked_claim",
+                first.packet.source.identifier,
+                first.packet.target.identifier,
+            ]
+        )
+    return f'''"""
+BioClaw Phase 2 OmegaClaw bounded-neighborhood mock-loop probe.
+
+Copy this file into OmegaClaw-Core/Autotests/mock/ and run it with the
+existing OmegaClaw mock harness. It verifies that BioClaw can pass a bounded,
+ranked MORK BioAtomspace neighborhood into OmegaClaw's native (metta ...)
+skill path as curation-state atoms.
+"""
+import subprocess
+import time
+
+from helpers import CONTAINER, Checker, make_prompt, wait_for_skill_call
+
+
+SKILL_PAYLOAD = {skill_payload!r}
+SKILL_COMMANDS = {skill_commands!r}
+REQUIRED_LOG_FRAGMENTS = {required_fragments!r}
+RANKED_EXPECTED = {bool(ranked)!r}
+
+
+def docker_logs():
+    res = subprocess.run(
+        ["docker", "logs", CONTAINER],
+        capture_output=True,
+        text=True,
+    )
+    return (res.stdout or "") + (res.stderr or "")
+
+
+def test_bioclaw_omegaclaw_neighborhood_mock(llm, comm):
+    with Checker("BioClaw OmegaClaw bounded neighborhood probe (mock)") as c:
+        print(f"\\n=== BioClaw: OmegaClaw neighborhood probe (run-id {{c.run_id}}) ===", flush=True)
+
+        marker = f"BIOCLAW-OMEGA-NEIGHBORHOOD-{{c.run_id}}"
+        c.add_cleanup_marker(marker)
+
+        prompt = make_prompt(
+            c.run_id,
+            "Run the BioClaw bounded neighborhood curation-state payload and acknowledge.",
+        )
+        response = SKILL_COMMANDS + f' (send "{{marker}} dispatched.")'
+        llm.set_answer(prompt, response)
+        if not comm.send_message(prompt):
+            c.fail("comm", "could not deliver prompt within 60s")
+        c.ok("comm", f"run-id={{c.run_id}}")
+
+        c.step("verify neighborhood metta call was dispatched")
+        neighborhood_arg = wait_for_skill_call(
+            c.run_id,
+            "metta",
+            timeout=60,
+            arg_substr="bioclaw_neighborhood",
+        )
+        if neighborhood_arg is None:
+            c.fail("neighborhood dispatched", "no matching (metta ...) call observed")
+        c.ok("neighborhood dispatched", f"arg={{neighborhood_arg[:140]!r}}")
+
+        if RANKED_EXPECTED:
+            c.step("verify ranked claim metta call was dispatched")
+            ranked_arg = wait_for_skill_call(
+                c.run_id,
+                "metta",
+                timeout=60,
+                arg_substr="bioclaw_ranked_claim",
+            )
+            if ranked_arg is None:
+                c.fail("ranked claim dispatched", "no matching (metta ...) call observed")
+            c.ok("ranked claim dispatched", f"arg={{ranked_arg[:140]!r}}")
+
+            c.step("verify curation state metta call was dispatched")
+            state_arg = wait_for_skill_call(
+                c.run_id,
+                "metta",
+                timeout=60,
+                arg_substr="bioclaw_curation_state",
+            )
+            if state_arg is None:
+                c.fail("curation state dispatched", "no matching (metta ...) call observed")
+            c.ok("curation state dispatched", f"arg={{state_arg[:140]!r}}")
+        else:
+            c.ok("ranked claims skipped", "no neighborhood edges were available to rank")
+
+        c.step("verify bounded neighborhood fragments are visible in OmegaClaw logs")
+        deadline = time.time() + 60
+        logs = ""
+        while time.time() < deadline:
+            logs = docker_logs()
+            if all(fragment in logs for fragment in REQUIRED_LOG_FRAGMENTS):
+                break
+            time.sleep(2)
+        missing = [fragment for fragment in REQUIRED_LOG_FRAGMENTS if fragment not in logs]
+        if missing:
+            c.fail("neighborhood visible", f"missing log fragments: {{missing!r}}")
+        c.ok("neighborhood visible", "found neighborhood and ranked-claim fragments in logs")
+
+        c.done()
+'''
+
+
 def revision_probe_program(first: tuple[float, float], second: tuple[float, float]) -> str:
     return "\n".join(
         [
@@ -476,6 +689,59 @@ def omega_spike_payload(
                 "The OmegaClaw-native execution surface is the in-process (metta ...) skill.",
                 "Run this through the OmegaClaw agent loop or mock-loop harness; run.sh one-shot files do not exercise skill dispatch.",
                 "The packet-local assessment remains an interim Python heuristic unless an OmegaClaw skill call is executed by the agent loop.",
+            ],
+        },
+        "engine": _engine_status(program, invoke_engine, engine_command, timeout),
+    }
+    return OmegaClawSpikeResult(payload=payload, metta_program=program)
+
+
+def omega_neighborhood_payload(
+    neighborhood: NeighborhoodPacket,
+    raw_neighborhood: NeighborhoodPacket,
+    policy: dict[str, Any],
+    *,
+    top: int = 20,
+    neighborhood_id: str | None = None,
+    invoke_engine: bool = False,
+    engine_command: str = "metta",
+    timeout: int = 30,
+) -> OmegaClawSpikeResult:
+    resolved_id = neighborhood_id or _neighborhood_id(neighborhood)
+    program = metta_program_for_neighborhood(
+        neighborhood,
+        raw_neighborhood,
+        policy,
+        top=top,
+        neighborhood_id=resolved_id,
+    )
+    report = report_dict(neighborhood, raw_neighborhood, policy, top=top)
+    payload = {
+        "phase": "phase_2_bounded_neighborhood_symbolic_prioritization",
+        "scope": "one bounded MORK relation neighborhood",
+        "neighborhood_report": report,
+        "omega_payload": {
+            "neighborhood_id": resolved_id,
+            "metta_program": program,
+            "omega_skill_call": omegaclaw_skill_payload(
+                neighborhood_skill_expressions(
+                    neighborhood,
+                    policy,
+                    top=top,
+                    neighborhood_id=resolved_id,
+                )
+            ),
+            "omega_mock_test": omegaclaw_neighborhood_mock_pytest(
+                neighborhood,
+                policy,
+                top=top,
+                neighborhood_id=resolved_id,
+            ),
+            "notes": [
+                "This payload is grounded in a bounded MORK neighborhood, not a global KG inference.",
+                "The emitted atoms represent ranked claims and curation-state labels for OmegaClaw skill dispatch.",
+                "PLN revision is not assumed for neighborhood ranking; exact claim revision remains conditional on comparable truth values.",
+                "Run this through the OmegaClaw mock-loop harness to verify native (metta ...) dispatch.",
             ],
         },
         "engine": _engine_status(program, invoke_engine, engine_command, timeout),
