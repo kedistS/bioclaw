@@ -95,6 +95,93 @@ def omegaclaw_skill_payload(expressions: list[str]) -> str:
     return _skill_tuple(expressions)
 
 
+def omegaclaw_mock_pytest(expressions: list[str]) -> str:
+    skill_payload = omegaclaw_skill_payload(expressions).strip()
+    return f'''"""
+BioClaw Phase 2 OmegaClaw mock-loop probe.
+
+Copy this file into OmegaClaw-Core/Autotests/mock/ and run it with the
+existing OmegaClaw mock harness. It verifies that BioClaw's generated
+(metta ...) payload is dispatched by src/loop.metta and that PLN revision
+returns the expected revised STV values, rather than merely echoing input.
+"""
+import subprocess
+import time
+
+from helpers import CONTAINER, Checker, make_prompt, wait_for_skill_call
+
+
+SKILL_PAYLOAD = {skill_payload!r}
+
+
+def docker_logs():
+    res = subprocess.run(
+        ["docker", "logs", CONTAINER],
+        capture_output=True,
+        text=True,
+    )
+    return (res.stdout or "") + (res.stderr or "")
+
+
+def test_bioclaw_omegaclaw_pln_probe_mock(llm, comm):
+    with Checker("BioClaw OmegaClaw PLN probe (mock)") as c:
+        print(f"\\n=== BioClaw: OmegaClaw PLN probe (run-id {{c.run_id}}) ===", flush=True)
+
+        marker = f"BIOCLAW-OMEGA-PLN-{{c.run_id}}"
+        c.add_cleanup_marker(marker)
+
+        prompt = make_prompt(
+            c.run_id,
+            "Run the BioClaw OmegaClaw PLN probe payload and acknowledge.",
+        )
+        response = SKILL_PAYLOAD[:-1] + f' (send "{{marker}} dispatched."))'
+        llm.set_answer(prompt, response)
+        if not comm.send_message(prompt):
+            c.fail("comm", "could not deliver prompt within 60s")
+        c.ok("comm", f"run-id={{c.run_id}}")
+
+        c.step("verify Truth__Revision metta call was dispatched")
+        revision_arg = wait_for_skill_call(
+            c.run_id,
+            "metta",
+            timeout=60,
+            arg_substr="Truth__Revision",
+        )
+        if revision_arg is None:
+            c.fail("Truth__Revision dispatched", "no matching (metta ...) call observed")
+        c.ok("Truth__Revision dispatched", f"arg={{revision_arg[:100]!r}}")
+
+        c.step("verify public |~ metta call was dispatched")
+        pln_arg = wait_for_skill_call(
+            c.run_id,
+            "metta",
+            timeout=60,
+            arg_substr="|~",
+        )
+        if pln_arg is None:
+            c.fail("|~ dispatched", "no matching (metta ...) call observed")
+        c.ok("|~ dispatched", f"arg={{pln_arg[:100]!r}}")
+
+        c.step("verify OmegaClaw produced revised STV values")
+        deadline = time.time() + 60
+        logs = ""
+        while time.time() < deadline:
+            logs = docker_logs()
+            if "0.742" in logs and "0.823" in logs:
+                break
+            time.sleep(2)
+        if "0.742" not in logs or "0.823" not in logs:
+            c.fail(
+                "revised STV visible",
+                "did not find expected Truth__Revision output fragments "
+                "0.742 and 0.823 in docker logs",
+            )
+        c.ok("revised STV visible", "found expected revised STV fragments in logs")
+
+        c.done()
+'''
+
+
 def revision_probe_program(first: tuple[float, float], second: tuple[float, float]) -> str:
     return "\n".join(
         [

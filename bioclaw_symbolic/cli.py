@@ -10,7 +10,7 @@ from typing import Any
 from .audit import property_audit
 from .evidence import EntityRef
 from .mork import MorkClient
-from .omegaclaw import omega_revision_probe, omega_spike_payload
+from .omegaclaw import omega_revision_probe, omega_spike_payload, omegaclaw_mock_pytest, revision_probe_skill_expressions
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import render_report, report_dict
 from .schema import SchemaRegistry
@@ -28,6 +28,15 @@ def _omega_output_text(result, output_format: str) -> str:
         return result.metta_program
     if output_format == "skill":
         return result.payload["omega_payload"]["omega_skill_call"]
+    if output_format == "mock-test":
+        first = result.payload["inputs"]["first_stv"]
+        second = result.payload["inputs"]["second_stv"]
+        return omegaclaw_mock_pytest(
+            revision_probe_skill_expressions(
+                (first["strength"], first["confidence"]),
+                (second["strength"], second["confidence"]),
+            )
+        )
     return json.dumps(result.payload, indent=2, sort_keys=True) + "\n"
 
 
@@ -251,7 +260,7 @@ def cmd_omega_probe(args: argparse.Namespace) -> int:
         target = Path(args.export)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_omega_output_text(result, args.format))
-    if args.format in {"metta", "skill"}:
+    if args.format in {"metta", "skill", "mock-test"}:
         print(_omega_output_text(result, args.format), end="")
     else:
         _print_json(result.payload)
@@ -491,7 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
     omega_probe.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
     omega_probe.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
     omega_probe.add_argument("--export", help="write the probe payload to a file")
-    omega_probe.add_argument("--format", choices=["json", "metta", "skill"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload")
+    omega_probe.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
     omega_probe.set_defaults(func=cmd_omega_probe)
 
     neighborhood = sub.add_parser("neighborhood", help="extract incident edge evidence packets from MORK")

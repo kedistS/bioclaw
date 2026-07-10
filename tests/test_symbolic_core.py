@@ -364,6 +364,18 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertEqual(result.payload["scope"], "controlled OmegaClaw PLN revision probe")
         self.assertEqual(result.payload["engine"]["status"], "not_requested")
 
+    def test_omega_mock_pytest_format_targets_loop_skill_dispatch(self) -> None:
+        from bioclaw_symbolic.cli import _omega_output_text
+
+        result = omega_revision_probe()
+        output = _omega_output_text(result, "mock-test")
+
+        self.assertIn("test_bioclaw_omegaclaw_pln_probe_mock", output)
+        self.assertIn('SKILL_PAYLOAD = ', output)
+        self.assertIn('(metta "(Truth__Revision', output)
+        self.assertIn('arg_substr="Truth__Revision"', output)
+        self.assertIn('"0.742" in logs and "0.823" in logs', output)
+
 
 if __name__ == "__main__":
     unittest.main()
