@@ -8,6 +8,7 @@ from pathlib import Path
 
 from bioclaw_symbolic.audit import property_audit
 from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPacket
+from bioclaw_symbolic.hypothesis import build_hypothesis_candidate, render_hypotheses
 from bioclaw_symbolic.mork import MorkClient
 from bioclaw_symbolic.omegaclaw import (
     omega_neighborhood_payload,
@@ -616,6 +617,66 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("Symbolic state:", text)
         self.assertIn("rank,claim,edge", csv_text)
         self.assertIn("STRING|Reactome", csv_text)
+
+    def test_traceable_hypothesis_candidate_preserves_path_and_edge_support(self) -> None:
+        schema_path = SchemaPath(
+            start_type="gene",
+            target_type="protein",
+            steps=(
+                SchemaPathStep(
+                    edge_name="gene transcript",
+                    edge_label="transcribes_to",
+                    source_type="gene",
+                    target_type="transcript",
+                ),
+                SchemaPathStep(
+                    edge_name="transcript protein",
+                    edge_label="translates_to",
+                    source_type="transcript",
+                    target_type="protein",
+                ),
+            ),
+        )
+        instance = PathInstance(
+            schema_path=schema_path,
+            nodes=(
+                EntityRef("gene", "ENSG00000154059"),
+                EntityRef("transcript", "ENST00000284202"),
+                EntityRef("protein", "Q9P2X3"),
+            ),
+        )
+        packets = [
+            EvidencePacket(
+                edge_type="transcribes_to",
+                source=instance.nodes[0],
+                target=instance.nodes[1],
+                exists=True,
+                annotations={"source": ["GENCODE"]},
+                annotation_roles={"source": "source"},
+            ),
+            EvidencePacket(
+                edge_type="translates_to",
+                source=instance.nodes[1],
+                target=instance.nodes[2],
+                exists=True,
+                annotations={"source": ["UniProt"], "score": ["0.9"]},
+                annotation_roles={"source": "source", "score": "score"},
+            ),
+        ]
+
+        candidate = build_hypothesis_candidate(instance, packets, load_policy("config/reasoning.yaml"))
+        text = render_hypotheses([candidate])
+
+        self.assertIn("hypothesis_candidate", candidate.labels)
+        self.assertIn("schema_path_support", candidate.labels)
+        self.assertIn("Truth__Deduction", candidate.symbolic_operations)
+        self.assertEqual(candidate.support_estimate, (0.9, 0.5))
+        self.assertIn("gene:ENSG00000154059", candidate.statement)
+        self.assertIn("transcribes_to -> translates_to", candidate.statement)
+        self.assertIn("curator-review candidate", candidate.caveat)
+        self.assertIn("Run the OmegaClaw path payload", " ".join(candidate.next_checks))
+        self.assertIn("BioClaw traceable hypothesis candidates", text)
+        self.assertIn("Truth__Deduction", text)
 
 
 if __name__ == "__main__":

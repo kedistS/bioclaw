@@ -9,6 +9,7 @@ from typing import Any
 
 from .audit import property_audit
 from .evidence import EntityRef
+from .hypothesis import build_hypothesis_candidate, render_hypotheses
 from .mork import MorkClient
 from .omegaclaw import omega_neighborhood_payload, omega_path_payload, omega_revision_probe, omega_spike_payload
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
@@ -511,6 +512,25 @@ def _path_instances_from_args(args: argparse.Namespace):
     return start, paths, candidates, traces
 
 
+def _edge_packets_for_instance(client: MorkClient, registry: SchemaRegistry, instance: PathInstance):
+    packets = []
+    for index, step in enumerate(instance.schema_path.steps):
+        source = instance.nodes[index]
+        target = instance.nodes[index + 1]
+        annotations = registry.edge_annotation_names(step.edge_label, source.label, target.label)
+        annotation_roles = registry.edge_annotation_roles(step.edge_label, source.label, target.label)
+        packets.append(
+            client.evidence_packet(
+                edge_type=step.edge_label,
+                source=source,
+                target=target,
+                annotations=annotations,
+                annotation_roles=annotation_roles,
+            )
+        )
+    return packets
+
+
 def cmd_omega_path(args: argparse.Namespace) -> int:
     _, paths, instances, traces = _path_instances_from_args(args)
     if not paths:
@@ -573,6 +593,75 @@ def cmd_omega_path(args: argparse.Namespace) -> int:
         print(_omega_output_text(result, args.format), end="")
     else:
         _print_json(result.payload)
+    return 0
+
+
+def cmd_hypotheses(args: argparse.Namespace) -> int:
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    client = _client(args)
+    start = _resolve_entity_arg(args.entity, client, registry, args.start_type)
+    start_type = args.start_type or start.label
+    paths = find_schema_paths(
+        registry,
+        start_type=start_type,
+        target_type=args.target_type,
+        max_depth=args.max_depth,
+        max_paths=args.max_paths,
+    )
+    policy = load_policy(args.reasoning)
+    candidates = []
+    traces = []
+    for schema_path in paths:
+        trace = client.path_trace(
+            schema_path=schema_path,
+            registry=registry,
+            start=start,
+            limit=args.instances_per_path,
+        )
+        traces.append(trace)
+        for item in trace.get("instances", []):
+            instance = PathInstance(
+                schema_path=schema_path,
+                nodes=tuple(EntityRef(node["label"], node["id"]) for node in item.get("nodes", [])),
+            )
+            packets = _edge_packets_for_instance(client, registry, instance)
+            candidates.append(build_hypothesis_candidate(instance, packets, policy))
+            if len(candidates) >= args.top:
+                break
+        if len(candidates) >= args.top:
+            break
+
+    data = {
+        "start": {"label": start.label, "id": start.identifier, "schema_type": start_type},
+        "target_type": args.target_type,
+        "schema_path_count": len(paths),
+        "hypothesis_count": len(candidates),
+        "hypotheses": [candidate.to_dict() for candidate in candidates],
+        "retrieval": {
+            "instances_per_path": args.instances_per_path,
+            "top": args.top,
+            "bounded": True,
+            "empty_traces": [
+                trace
+                for trace in traces
+                if not trace.get("instances")
+            ][:3],
+        },
+    }
+    if args.format == "json":
+        output = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_hypotheses(candidates, output_format=args.format)
+        if not candidates:
+            signatures = "; ".join(path.signature() for path in paths[:5]) or "none"
+            output += f"No hypothesis candidates were built. Schema paths checked: {signatures}\n"
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote hypothesis candidates to {target}")
+        return 0
+    print(output, end="")
     return 0
 
 
@@ -772,6 +861,24 @@ def build_parser() -> argparse.ArgumentParser:
     omega_path.add_argument("--export", help="write the path OmegaClaw payload to a file")
     omega_path.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
     omega_path.set_defaults(func=cmd_omega_path)
+
+    hypotheses = sub.add_parser("hypotheses", help="derive traceable curator-review hypotheses from schema-path instances")
+    hypotheses.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    hypotheses.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    hypotheses.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    hypotheses.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    hypotheses.add_argument("--entity", required=True, help="start entity as label:id, or a display name")
+    hypotheses.add_argument("--start-type", help="schema start type; defaults to the resolved entity label")
+    hypotheses.add_argument("--target-type", required=True, help="target schema node type, e.g. protein, pathway, disease")
+    hypotheses.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
+    hypotheses.add_argument("--max-paths", type=int, default=20, help="maximum schema paths to inspect")
+    hypotheses.add_argument("--instances-per-path", type=int, default=20, help="maximum MORK instances per schema path")
+    hypotheses.add_argument("--top", type=int, default=10, help="maximum hypothesis candidates to emit")
+    hypotheses.add_argument("--timeout", type=int, default=30)
+    hypotheses.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    hypotheses.add_argument("--export", help="write hypothesis candidates to a file")
+    hypotheses.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
+    hypotheses.set_defaults(func=cmd_hypotheses)
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
