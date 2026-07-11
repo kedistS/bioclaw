@@ -11,6 +11,7 @@ from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPac
 from bioclaw_symbolic.mork import MorkClient
 from bioclaw_symbolic.omegaclaw import omega_neighborhood_payload, omega_revision_probe, omega_spike_payload
 from bioclaw_symbolic.reasoning import load_policy, packet_assessment
+from bioclaw_symbolic.report import evidence_cards_dict, render_evidence_cards
 from bioclaw_symbolic.schema import SchemaRegistry
 from bioclaw_symbolic.schema_path import find_schema_paths
 
@@ -476,6 +477,49 @@ class SymbolicCoreTests(unittest.TestCase):
             path = Path(tmp) / "test_bioclaw_omegaclaw_neighborhood_mock.py"
             path.write_text(output)
             py_compile.compile(str(path), doraise=True)
+
+    def test_evidence_cards_are_curator_facing_and_exportable(self) -> None:
+        packet = EvidencePacket(
+            edge_type="interacts_with",
+            source=EntityRef("protein", "P20645"),
+            target=EntityRef("protein", "Q15836"),
+            exists=True,
+            annotations={
+                "source": ["STRING", "Reactome"],
+                "score": ["0.624"],
+                "source_url": ["https://string-db.org/", "https://reactome.org/"],
+                "interaction_type": ["physical_association"],
+            },
+            annotation_roles={
+                "source": "source",
+                "score": "score",
+                "source_url": "reference",
+                "interaction_type": "context",
+            },
+            source_details={"properties": {"protein_name": {"role": "name", "values": ["MPRD"], "biolink": "name"}}},
+            target_details={"properties": {"protein_name": {"role": "name", "values": ["VAMP3"], "biolink": "name"}}},
+        )
+        neighborhood = NeighborhoodPacket(
+            focus=EntityRef("protein", "P20645"),
+            edge_type="interacts_with",
+            packets=[packet],
+            limit=10,
+        )
+        policy = load_policy("config/reasoning.yaml")
+
+        data = evidence_cards_dict(neighborhood, neighborhood, policy, top=1)
+        text = render_evidence_cards(neighborhood, neighborhood, policy, top=1)
+        csv_text = render_evidence_cards(neighborhood, neighborhood, policy, top=1, output_format="csv")
+
+        self.assertEqual(data["retrieval"]["card_count"], 1)
+        self.assertEqual(data["cards"][0]["claim"]["text"], "MPRD (protein:P20645) -[interacts_with]-> VAMP3 (protein:Q15836)")
+        self.assertIn("multi_source", data["cards"][0]["symbolic_state"]["labels"])
+        self.assertIn("not independent causal proof", data["cards"][0]["caveat"])
+        self.assertIn("Card 1: MPRD", text)
+        self.assertIn("Support sources: STRING, Reactome", text)
+        self.assertIn("Symbolic state:", text)
+        self.assertIn("rank,claim,edge", csv_text)
+        self.assertIn("STRING|Reactome", csv_text)
 
 
 if __name__ == "__main__":

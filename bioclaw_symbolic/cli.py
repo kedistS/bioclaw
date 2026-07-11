@@ -12,7 +12,7 @@ from .evidence import EntityRef
 from .mork import MorkClient
 from .omegaclaw import omega_neighborhood_payload, omega_revision_probe, omega_spike_payload
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
-from .report import render_report, report_dict
+from .report import evidence_cards_dict, render_evidence_cards, render_report, report_dict
 from .schema import SchemaRegistry
 from .schema_path import find_schema_paths
 
@@ -354,6 +354,29 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evidence_cards(args: argparse.Namespace) -> int:
+    raw_neighborhood, neighborhood = _retrieve_neighborhood(args)
+    policy = load_policy(args.reasoning)
+    if args.format == "json":
+        output = json.dumps(evidence_cards_dict(neighborhood, raw_neighborhood, policy, top=args.top), indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_evidence_cards(
+            neighborhood,
+            raw_neighborhood,
+            policy,
+            top=args.top,
+            output_format=args.format,
+        )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote evidence cards to {target}")
+        return 0
+    print(output, end="")
+    return 0
+
+
 def cmd_omega_neighborhood(args: argparse.Namespace) -> int:
     raw_neighborhood, neighborhood = _retrieve_neighborhood(args)
     policy = load_policy(args.reasoning)
@@ -568,6 +591,26 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="report output format")
     report.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     report.set_defaults(func=cmd_report)
+
+    cards = sub.add_parser("evidence-cards", help="render curator-facing evidence cards from a ranked neighborhood")
+    cards.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
+    cards.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    cards.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    cards.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    cards.add_argument("--entity", required=True, help="focus entity as label:id, or a display name")
+    cards.add_argument("--entity-type", help="optional schema/node label used to constrain entity name resolution")
+    cards.add_argument("--edge", required=True, help="edge predicate, e.g. interacts_with")
+    cards.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    cards.add_argument("--limit", type=int, default=100, help="backward-compatible retrieval cap")
+    cards.add_argument("--max-total", type=int, help="maximum candidate edges to retrieve/process; overrides --limit")
+    cards.add_argument("--timeout", type=int, default=30)
+    cards.add_argument("--include-node-details", action="store_true", help="enrich source/target nodes using schema-selected node properties")
+    cards.add_argument("--only-multisource", action="store_true", help="include only edges with more than one source annotation")
+    cards.add_argument("--top", type=int, default=20, help="number of evidence cards to show")
+    cards.add_argument("--format", choices=["text", "markdown", "json", "csv"], default="text", help="card output format")
+    cards.add_argument("--export", help="write evidence cards to a file")
+    cards.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    cards.set_defaults(func=cmd_evidence_cards)
 
     omega_neighborhood = sub.add_parser("omega-neighborhood", help="marshal a bounded neighborhood into OmegaClaw curation-state atoms")
     omega_neighborhood.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
