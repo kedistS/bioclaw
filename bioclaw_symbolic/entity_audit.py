@@ -110,6 +110,15 @@ def _direction_for(edge: EdgeCapability, focus_label: str, registry: SchemaRegis
     return None
 
 
+def _packet_matches_schema_edge(packet: EvidencePacket, edge: EdgeCapability, registry: SchemaRegistry) -> bool:
+    source_labels = {_normalize_label(label) for label in _endpoint_labels(registry, edge.source)}
+    target_labels = {_normalize_label(label) for label in _endpoint_labels(registry, edge.target)}
+    return (
+        _normalize_label(packet.source.label) in source_labels
+        and _normalize_label(packet.target.label) in target_labels
+    )
+
+
 def _edge_examples(packets: list[EvidencePacket], focus: EntityRef, direction: str, limit: int = 5) -> tuple[dict[str, Any], ...]:
     examples: list[dict[str, Any]] = []
     for packet in packets[:limit]:
@@ -195,6 +204,11 @@ def build_entity_audit(
             annotation_roles=annotation_roles,
         )
         neighborhood = client.enrich_neighborhood_nodes(neighborhood, registry)
+        neighborhood = neighborhood.with_packets([
+            packet
+            for packet in neighborhood.packets
+            if _packet_matches_schema_edge(packet, edge, registry)
+        ])
         audits.append(
             RelationAudit(
                 edge_name=edge.name,

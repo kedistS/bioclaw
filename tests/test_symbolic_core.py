@@ -71,6 +71,22 @@ class FakeMorkClient(MorkClient):
                 ],
                 limit=limit,
             )
+        if edge_type == "associated_with":
+            return NeighborhoodPacket(
+                focus=focus,
+                edge_type=edge_type,
+                packets=[
+                    EvidencePacket(
+                        edge_type=edge_type,
+                        source=EntityRef("enhancer", "CHR1_1_2_GRCH38"),
+                        target=focus,
+                        exists=True,
+                        annotations={"source": ["Enhancer_Atlas"]},
+                        annotation_roles={"source": "source"},
+                    )
+                ],
+                limit=limit,
+            )
         return NeighborhoodPacket(focus=focus, edge_type=edge_type, packets=[], limit=limit)
 
 
@@ -784,6 +800,70 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("relation_missing_in_bounded_retrieval", data["relations"][1]["curation_states"])
         self.assertIn("REACTOME=1", text)
         self.assertIn("needs_coverage_review", text)
+
+    def test_entity_audit_filters_shared_predicates_by_schema_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schema_path = Path(tmp) / "schema.yaml"
+            policy_path = Path(tmp) / "roles.yaml"
+            schema_path.write_text(
+                textwrap.dedent(
+                    """
+                    gene:
+                      represented_as: node
+                      input_label: gene
+                    enhancer:
+                      represented_as: node
+                      input_label: enhancer
+                    promoter:
+                      represented_as: node
+                      input_label: promoter
+                    enhancer gene:
+                      represented_as: edge
+                      input_label: associated_with
+                      source: enhancer
+                      target: gene
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                    promoter gene:
+                      represented_as: edge
+                      input_label: associated_with
+                      source: promoter
+                      target: gene
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                    """
+                )
+            )
+            policy_path.write_text(
+                textwrap.dedent(
+                    """
+                    edge_property_roles:
+                      source:
+                        names: [source]
+                    """
+                )
+            )
+            registry = SchemaRegistry.from_file(schema_path, policy_path)
+
+        audit = build_entity_audit(
+            FakeMorkClient(),
+            registry,
+            EntityRef("gene", "ENSG00000141510"),
+            "gene",
+            load_policy("config/reasoning.yaml"),
+        )
+        relations = {item.schema_signature: item for item in audit.relation_audits}
+
+        self.assertEqual(relations["enhancer -[associated_with]-> gene"].edge_count, 1)
+        self.assertEqual(relations["promoter -[associated_with]-> gene"].edge_count, 0)
+        self.assertIn(
+            "relation_missing_in_bounded_retrieval",
+            relations["promoter -[associated_with]-> gene"].curation_states,
+        )
 
 
 if __name__ == "__main__":
