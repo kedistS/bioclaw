@@ -700,9 +700,31 @@ def cmd_entity_audit(args: argparse.Namespace) -> int:
         max_edges_per_relation=args.max_edges_per_relation,
     )
     if args.format == "json":
-        output = json.dumps(audit.to_dict(), indent=2, sort_keys=True) + "\n"
+        data = audit.to_dict()
+        if args.only_supported:
+            data["relations"] = [
+                relation
+                for relation in data["relations"]
+                if relation["edge_count"] > 0
+            ]
+        if args.show_missing_summary:
+            missing = [
+                relation["schema_signature"]
+                for relation in audit.to_dict()["relations"]
+                if relation["edge_count"] == 0
+            ]
+            data["missing_summary"] = {
+                "count": len(missing),
+                "schema_signatures": missing,
+            }
+        output = json.dumps(data, indent=2, sort_keys=True) + "\n"
     else:
-        output = render_entity_audit(audit, output_format=args.format)
+        output = render_entity_audit(
+            audit,
+            output_format=args.format,
+            only_supported=args.only_supported,
+            show_missing_summary=args.show_missing_summary,
+        )
     if args.export:
         target = Path(args.export)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -919,6 +941,8 @@ def build_parser() -> argparse.ArgumentParser:
     entity_audit.add_argument("--entity", required=True, help="entity as label:id, or a display name")
     entity_audit.add_argument("--entity-type", help="schema/node label used to constrain entity name resolution")
     entity_audit.add_argument("--max-edges-per-relation", type=int, default=50, help="bounded retrieval cap per schema relation")
+    entity_audit.add_argument("--only-supported", action="store_true", help="render/export only relations with at least one matching edge")
+    entity_audit.add_argument("--show-missing-summary", action="store_true", help="summarize missing schema relations instead of relying on full relation listing")
     entity_audit.add_argument("--timeout", type=int, default=30)
     entity_audit.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
     entity_audit.add_argument("--export", help="write entity audit to a file")

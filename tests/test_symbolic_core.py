@@ -800,6 +800,10 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("relation_missing_in_bounded_retrieval", data["relations"][1]["curation_states"])
         self.assertIn("REACTOME=1", text)
         self.assertIn("needs_coverage_review", text)
+        compact = render_entity_audit(audit, only_supported=True, show_missing_summary=True)
+        self.assertIn("gene -[participates_in]-> pathway", compact)
+        self.assertNotIn("\ngene -[involved_in]-> biological process\n  Direction:", compact)
+        self.assertIn("Missing schema coverage: 1 missing relation(s)", compact)
 
     def test_entity_audit_filters_shared_predicates_by_schema_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

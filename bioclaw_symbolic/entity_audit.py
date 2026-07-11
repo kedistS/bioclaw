@@ -234,8 +234,34 @@ def build_entity_audit(
     )
 
 
-def render_entity_audit(audit: EntityAudit, *, output_format: str = "text") -> str:
+def _relations_for_render(
+    audit: EntityAudit,
+    *,
+    only_supported: bool,
+) -> tuple[list[RelationAudit], list[RelationAudit]]:
+    supported = [item for item in audit.relation_audits if item.edge_count > 0]
+    missing = [item for item in audit.relation_audits if item.edge_count == 0]
+    return (supported if only_supported else list(audit.relation_audits), missing)
+
+
+def _missing_summary(missing: list[RelationAudit]) -> str:
+    if not missing:
+        return "none"
+    labels = [relation.schema_signature for relation in missing]
+    preview = ", ".join(labels[:12])
+    suffix = f", +{len(labels) - 12} more" if len(labels) > 12 else ""
+    return f"{len(labels)} missing relation(s): {preview}{suffix}"
+
+
+def render_entity_audit(
+    audit: EntityAudit,
+    *,
+    output_format: str = "text",
+    only_supported: bool = False,
+    show_missing_summary: bool = False,
+) -> str:
     data = audit.to_dict()
+    relations, missing = _relations_for_render(audit, only_supported=only_supported)
     if output_format == "markdown":
         lines = [
             f"# BioClaw Entity Curation Audit: {audit.entity.label}:{audit.entity.identifier}",
@@ -245,7 +271,9 @@ def render_entity_audit(audit: EntityAudit, *, output_format: str = "text") -> s
                 f"{data['relation_count']} schema relation(s)."
             ),
         ]
-        for relation in audit.relation_audits:
+        if show_missing_summary:
+            lines.extend(["", f"Missing schema coverage: {_missing_summary(missing)}"])
+        for relation in relations:
             lines.extend(
                 [
                     "",
@@ -274,7 +302,9 @@ def render_entity_audit(audit: EntityAudit, *, output_format: str = "text") -> s
             f"{data['relation_count']} schema relation(s)."
         ),
     ]
-    for relation in audit.relation_audits:
+    if show_missing_summary:
+        lines.extend(["", f"Missing schema coverage: {_missing_summary(missing)}"])
+    for relation in relations:
         lines.extend(
             [
                 "",
