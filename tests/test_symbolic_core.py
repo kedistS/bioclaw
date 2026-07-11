@@ -31,8 +31,12 @@ class FakeMorkClient(MorkClient):
         self.export_calls.append((pattern, template))
         if pattern == "(gene_name (gene $eid) IMPACT)":
             return [template.replace("$eid", "ENSG00000154059")]
+        if pattern == "(gene_name (gene $eid) TP53)":
+            return [template.replace("$eid", "ENSG00000141510")]
         if pattern == "(gene ENSG00000154059)":
             return ["(gene ENSG00000154059)"]
+        if pattern == "(gene TP53)":
+            return ["(gene TP53)"]
         return []
 
     def transform(self, patterns: list[str], template: str) -> list[str]:
@@ -135,6 +139,42 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertEqual(resolved, EntityRef("gene", "ENSG00000154059"))
         self.assertTrue(
             any(pattern == "(gene_name (gene $eid) IMPACT)" for pattern, _ in client.export_calls)
+        )
+
+    def test_resolve_entity_prefers_schema_name_over_raw_digit_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schema_path = Path(tmp) / "schema.yaml"
+            policy_path = Path(tmp) / "roles.yaml"
+            schema_path.write_text(
+                textwrap.dedent(
+                    """
+                    gene:
+                      represented_as: node
+                      input_label: gene
+                      properties:
+                        gene_name:
+                          type: str
+                          biolink: name
+                    """
+                )
+            )
+            policy_path.write_text(
+                textwrap.dedent(
+                    """
+                    node_property_roles:
+                      name:
+                        biolink: [name]
+                    """
+                )
+            )
+            registry = SchemaRegistry.from_file(schema_path, policy_path)
+
+        client = FakeMorkClient()
+        resolved = client.resolve_entity("TP53", registry, "gene")
+
+        self.assertEqual(resolved, EntityRef("gene", "ENSG00000141510"))
+        self.assertTrue(
+            any(pattern == "(gene_name (gene $eid) TP53)" for pattern, _ in client.export_calls)
         )
 
     def test_mork_parse_body_drops_unresolved_template_echoes(self) -> None:
