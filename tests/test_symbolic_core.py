@@ -7,6 +7,7 @@ import py_compile
 from pathlib import Path
 
 from bioclaw_symbolic.audit import property_audit
+from bioclaw_symbolic.entity_audit import build_entity_audit, render_entity_audit
 from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPacket
 from bioclaw_symbolic.hypothesis import build_hypothesis_candidate, render_hypotheses
 from bioclaw_symbolic.mork import MorkClient
@@ -44,6 +45,33 @@ class FakeMorkClient(MorkClient):
         self.transform_calls.append((patterns, template))
         tag = template.split(maxsplit=1)[0].lstrip("(")
         return [f"({tag} (transcript ENST00000284202) (protein Q9P0P0))"]
+
+    def neighborhood(
+        self,
+        edge_type: str,
+        focus: EntityRef,
+        direction: str = "both",
+        limit: int = 100,
+        annotations: list[str] | None = None,
+        annotation_roles: dict[str, str] | None = None,
+    ) -> NeighborhoodPacket:
+        if edge_type == "participates_in":
+            return NeighborhoodPacket(
+                focus=focus,
+                edge_type=edge_type,
+                packets=[
+                    EvidencePacket(
+                        edge_type=edge_type,
+                        source=focus,
+                        target=EntityRef("pathway", "R-HSA-1"),
+                        exists=True,
+                        annotations={"source": ["REACTOME"], "source_url": ["https://reactome.org"]},
+                        annotation_roles={"source": "source", "source_url": "reference"},
+                    )
+                ],
+                limit=limit,
+            )
+        return NeighborhoodPacket(focus=focus, edge_type=edge_type, packets=[], limit=limit)
 
 
 class SymbolicCoreTests(unittest.TestCase):
@@ -679,6 +707,83 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("Truth__Deduction", text)
         self.assertIn("Edge support", text)
         self.assertIn("sources: GENCODE", text)
+
+    def test_entity_audit_reports_supported_and_missing_schema_relations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schema_path = Path(tmp) / "schema.yaml"
+            policy_path = Path(tmp) / "roles.yaml"
+            schema_path.write_text(
+                textwrap.dedent(
+                    """
+                    gene:
+                      represented_as: node
+                      input_label: gene
+                      properties:
+                        gene_name:
+                          type: str
+                          biolink: name
+                    pathway:
+                      represented_as: node
+                      input_label: pathway
+                    biological process:
+                      represented_as: node
+                      input_label: biological_process
+                    gene pathway:
+                      represented_as: edge
+                      input_label: participates_in
+                      source: gene
+                      target: pathway
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                        source_url:
+                          type: str
+                          biolink: source_web_page
+                    gene process:
+                      represented_as: edge
+                      input_label: involved_in
+                      source: gene
+                      target: biological process
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                    """
+                )
+            )
+            policy_path.write_text(
+                textwrap.dedent(
+                    """
+                    edge_property_roles:
+                      source:
+                        names: [source]
+                      reference:
+                        names: [source_url]
+                    node_property_roles:
+                      name:
+                        biolink: [name]
+                    """
+                )
+            )
+            registry = SchemaRegistry.from_file(schema_path, policy_path)
+
+        audit = build_entity_audit(
+            FakeMorkClient(),
+            registry,
+            EntityRef("gene", "ENSG00000141510"),
+            "gene",
+            load_policy("config/reasoning.yaml"),
+        )
+        data = audit.to_dict()
+        text = render_entity_audit(audit)
+
+        self.assertEqual(data["supported_relation_count"], 1)
+        self.assertEqual(data["missing_relation_count"], 1)
+        self.assertIn("relation_present", data["relations"][0]["curation_states"])
+        self.assertIn("relation_missing_in_bounded_retrieval", data["relations"][1]["curation_states"])
+        self.assertIn("REACTOME=1", text)
+        self.assertIn("needs_coverage_review", text)
 
 
 if __name__ == "__main__":

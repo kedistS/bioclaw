@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import property_audit
+from .entity_audit import build_entity_audit, render_entity_audit
 from .evidence import EntityRef
 from .hypothesis import build_hypothesis_candidate, render_hypotheses
 from .mork import MorkClient
@@ -685,6 +686,33 @@ def cmd_audit_properties(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_entity_audit(args: argparse.Namespace) -> int:
+    client = _client(args)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    entity = _resolve_entity_arg(args.entity, client, registry, args.entity_type)
+    schema_type = args.entity_type or entity.label
+    audit = build_entity_audit(
+        client,
+        registry,
+        entity,
+        schema_type,
+        load_policy(args.reasoning),
+        max_edges_per_relation=args.max_edges_per_relation,
+    )
+    if args.format == "json":
+        output = json.dumps(audit.to_dict(), indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_entity_audit(audit, output_format=args.format)
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote entity audit to {target}")
+        return 0
+    print(output, end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bioclaw-symbolic")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -882,6 +910,20 @@ def build_parser() -> argparse.ArgumentParser:
     hypotheses.add_argument("--export", help="write hypothesis candidates to a file")
     hypotheses.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
     hypotheses.set_defaults(func=cmd_hypotheses)
+
+    entity_audit = sub.add_parser("entity-audit", help="audit all schema relations incident to one entity in MORK")
+    entity_audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    entity_audit.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    entity_audit.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    entity_audit.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    entity_audit.add_argument("--entity", required=True, help="entity as label:id, or a display name")
+    entity_audit.add_argument("--entity-type", help="schema/node label used to constrain entity name resolution")
+    entity_audit.add_argument("--max-edges-per-relation", type=int, default=50, help="bounded retrieval cap per schema relation")
+    entity_audit.add_argument("--timeout", type=int, default=30)
+    entity_audit.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    entity_audit.add_argument("--export", help="write entity audit to a file")
+    entity_audit.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
+    entity_audit.set_defaults(func=cmd_entity_audit)
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
