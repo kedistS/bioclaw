@@ -14,7 +14,7 @@ from .omegaclaw import omega_neighborhood_payload, omega_path_payload, omega_rev
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import evidence_cards_dict, render_evidence_cards, render_report, report_dict
 from .schema import SchemaRegistry
-from .schema_path import find_schema_paths
+from .schema_path import PathInstance, find_schema_paths
 
 DEFAULT_SCHEMA_POLICY = "config/schema_roles.yaml"
 
@@ -490,20 +490,29 @@ def _path_instances_from_args(args: argparse.Namespace):
         max_paths=args.max_paths,
     )
     candidates = []
+    traces = []
     for schema_path in paths:
-        instances = client.path_instances(
+        trace = client.path_trace(
             schema_path=schema_path,
             registry=registry,
             start=start,
             limit=args.instances_per_path,
         )
+        traces.append(trace)
+        instances = [
+            PathInstance(
+                schema_path=schema_path,
+                nodes=tuple(EntityRef(node["label"], node["id"]) for node in item.get("nodes", [])),
+            )
+            for item in trace.get("instances", [])
+        ]
         for instance in instances:
             candidates.append(instance)
-    return start, paths, candidates
+    return start, paths, candidates, traces
 
 
 def cmd_omega_path(args: argparse.Namespace) -> int:
-    _, paths, instances = _path_instances_from_args(args)
+    _, paths, instances, traces = _path_instances_from_args(args)
     if not paths:
         raise ValueError(
             f"schema has no path from {args.start_type or args.entity} to {args.target_type} "
@@ -511,9 +520,33 @@ def cmd_omega_path(args: argparse.Namespace) -> int:
         )
     if not instances:
         signatures = "; ".join(path.signature() for path in paths[:5])
+        diagnostics = []
+        for trace in traces[:3]:
+            blocked = trace.get("blocked_at_step")
+            steps = trace.get("steps", [])
+            if blocked is None:
+                step_text = "not blocked, but no full instance returned"
+            elif blocked == 0:
+                step_text = "start label did not match schema path"
+            elif 0 < blocked <= len(steps):
+                step = steps[blocked - 1]
+                step_text = (
+                    f"blocked at step {blocked} {step.get('edge_label')} "
+                    f"from {step.get('input_paths')} input path(s) to "
+                    f"{step.get('output_paths')} output path(s)"
+                )
+            else:
+                step_text = f"blocked at step {blocked}"
+            diagnostics.append(
+                f"{trace.get('schema_path', {}).get('signature')}: "
+                f"start_atom_exists={trace.get('start_atom_exists')}; "
+                f"node_labels={','.join(trace.get('node_labels', []))}; "
+                f"{step_text}"
+            )
         raise ValueError(
             "schema path(s) exist, but MORK returned no path instances for this start entity. "
-            f"Schema paths checked: {signatures}"
+            f"Schema paths checked: {signatures}. "
+            f"Diagnostics: {' | '.join(diagnostics)}"
         )
     if args.instance_index < 0 or args.instance_index >= len(instances):
         raise ValueError(
