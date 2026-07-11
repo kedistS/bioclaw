@@ -675,8 +675,10 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("transcribes_to -> translates_to", candidate.statement)
         self.assertIn("curator-review candidate", candidate.caveat)
         self.assertIn("Run the OmegaClaw path payload", " ".join(candidate.next_checks))
-        self.assertIn("BioClaw traceable hypothesis candidates", text)
+        self.assertIn("BioClaw traceable evidence and hypothesis candidates", text)
         self.assertIn("Truth__Deduction", text)
+        self.assertIn("Edge support", text)
+        self.assertIn("sources: GENCODE", text)
 
 
 if __name__ == "__main__":

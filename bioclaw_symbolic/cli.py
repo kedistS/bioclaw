@@ -520,12 +520,15 @@ def _edge_packets_for_instance(client: MorkClient, registry: SchemaRegistry, ins
         annotations = registry.edge_annotation_names(step.edge_label, source.label, target.label)
         annotation_roles = registry.edge_annotation_roles(step.edge_label, source.label, target.label)
         packets.append(
-            client.evidence_packet(
-                edge_type=step.edge_label,
-                source=source,
-                target=target,
-                annotations=annotations,
-                annotation_roles=annotation_roles,
+            client.enrich_packet_nodes(
+                client.evidence_packet(
+                    edge_type=step.edge_label,
+                    source=source,
+                    target=target,
+                    annotations=annotations,
+                    annotation_roles=annotation_roles,
+                ),
+                registry,
             )
         )
     return packets

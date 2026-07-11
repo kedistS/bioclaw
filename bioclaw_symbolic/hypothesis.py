@@ -79,18 +79,45 @@ def _path_kind(instance: PathInstance) -> str:
     )
 
 
-def _entity_text(entity: EntityRef) -> str:
-    return f"{entity.label}:{entity.identifier}"
+def _name_from_details(details: dict[str, Any]) -> str | None:
+    properties = details.get("properties", {})
+    name_candidates = [
+        prop_data
+        for prop_data in properties.values()
+        if prop_data.get("role") == "name" and prop_data.get("values")
+    ]
+    if not name_candidates:
+        return None
+    name_candidates.sort(
+        key=lambda prop_data: 0
+        if str(prop_data.get("biolink", "")).replace(" ", "").lower().endswith("name")
+        else 1
+    )
+    return str(name_candidates[0]["values"][0])
 
 
-def _statement(instance: PathInstance) -> str:
-    start = _entity_text(instance.nodes[0])
-    target = _entity_text(instance.nodes[-1])
+def _entity_text(entity: EntityRef, details: dict[str, Any] | None = None) -> str:
+    base = f"{entity.label}:{entity.identifier}"
+    name = _name_from_details(details or {})
+    return f"{name} ({base})" if name else base
+
+
+def _statement(instance: PathInstance, edge_support: tuple[EdgeSupport, ...]) -> str:
+    first_packet = edge_support[0].packet if edge_support else None
+    last_packet = edge_support[-1].packet if edge_support else None
+    start = _entity_text(
+        instance.nodes[0],
+        first_packet.source_details if first_packet is not None else None,
+    )
+    target = _entity_text(
+        instance.nodes[-1],
+        last_packet.target_details if last_packet is not None else None,
+    )
     edge_chain = " -> ".join(instance.schema_path.edge_labels)
     if len(instance.schema_path.steps) == 1:
         edge = instance.schema_path.steps[0].edge_label
         return (
-            f"Hypothesis candidate: {start} has direct KG support for "
+            f"Evidence candidate: {start} has direct KG support for "
             f"{edge} {target}."
         )
     return (
@@ -100,10 +127,12 @@ def _statement(instance: PathInstance) -> str:
 
 
 def _labels(edge_support: tuple[EdgeSupport, ...]) -> tuple[str, ...]:
-    labels = ["hypothesis_candidate", "traceable_support"]
+    labels = ["traceable_support"]
     if len(edge_support) == 1:
+        labels.append("evidence_candidate")
         labels.append("direct_kg_support")
     else:
+        labels.append("hypothesis_candidate")
         labels.append("schema_path_support")
         labels.append("path_support_propagation_candidate")
     if any("missing_edge" in support.assessment.labels for support in edge_support):
@@ -189,7 +218,7 @@ def build_hypothesis_candidate(
     return HypothesisCandidate(
         hypothesis_id=resolved_id,
         kind=_path_kind(instance),
-        statement=_statement(instance),
+        statement=_statement(instance, edge_support),
         path_instance=instance,
         edge_support=edge_support,
         labels=_labels(edge_support),
@@ -204,10 +233,42 @@ def build_hypothesis_candidate(
     )
 
 
+def _support_entity_text(support: EdgeSupport, side: str) -> str:
+    if side == "source":
+        return _entity_text(support.source, support.packet.source_details)
+    return _entity_text(support.target, support.packet.target_details)
+
+
+def _edge_summary(support: EdgeSupport) -> str:
+    sources = support.packet.values_by_role("source")
+    evidence = support.packet.values_by_role("evidence")
+    scores = support.packet.values_by_role("score", "confidence")
+    refs = support.packet.values_by_role("reference")
+    context = support.packet.values_by_role("context")
+    pieces = [
+        (
+            f"{_support_entity_text(support, 'source')} -[{support.edge_type}]-> "
+            f"{_support_entity_text(support, 'target')}"
+        )
+    ]
+    if sources:
+        pieces.append(f"sources: {', '.join(sorted(set(sources)))}")
+    if scores:
+        pieces.append(f"scores: {', '.join(scores[:6])}")
+    if evidence:
+        pieces.append(f"evidence: {', '.join(sorted(set(evidence)))}")
+    if refs:
+        pieces.append(f"references: {', '.join(refs[:6])}")
+    if context:
+        pieces.append(f"context: {', '.join(context[:6])}")
+    pieces.append(f"labels: {', '.join(support.assessment.labels)}")
+    return " | ".join(pieces)
+
+
 def render_hypotheses(candidates: list[HypothesisCandidate], *, output_format: str = "text") -> str:
     if output_format == "markdown":
         lines = [
-            "# BioClaw Traceable Hypothesis Candidates",
+            "# BioClaw Traceable Evidence And Hypothesis Candidates",
             "",
             f"Built {len(candidates)} candidate(s).",
         ]
@@ -223,13 +284,18 @@ def render_hypotheses(candidates: list[HypothesisCandidate], *, output_format: s
                     f"- Labels: {', '.join(candidate.labels)}",
                     f"- Symbolic operations: {', '.join(candidate.symbolic_operations)}",
                     f"- Support estimate: strength {strength:.3f}, confidence {confidence:.3f}",
+                    "- Edge support:",
+                    *[
+                        f"  - Edge {support.index}: {_edge_summary(support)}"
+                        for support in candidate.edge_support
+                    ],
                     f"- Caveat: {candidate.caveat}",
                     "- Next checks: " + " | ".join(candidate.next_checks),
                 ]
             )
         return "\n".join(lines) + "\n"
 
-    lines = [f"BioClaw traceable hypothesis candidates ({len(candidates)})", "=" * 64]
+    lines = [f"BioClaw traceable evidence and hypothesis candidates ({len(candidates)})", "=" * 64]
     for index, candidate in enumerate(candidates, start=1):
         strength, confidence = candidate.support_estimate
         lines.extend(
@@ -240,6 +306,11 @@ def render_hypotheses(candidates: list[HypothesisCandidate], *, output_format: s
                 f"   Labels: {', '.join(candidate.labels)}",
                 f"   Symbolic operations: {', '.join(candidate.symbolic_operations)}",
                 f"   Support estimate: strength {strength:.3f}, confidence {confidence:.3f}",
+                "   Edge support:",
+                *[
+                    f"     - Edge {support.index}: {_edge_summary(support)}"
+                    for support in candidate.edge_support
+                ],
                 f"   Caveat: {candidate.caveat}",
                 f"   Next checks: {' | '.join(candidate.next_checks)}",
             ]
