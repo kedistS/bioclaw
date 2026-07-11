@@ -9,11 +9,16 @@ from pathlib import Path
 from bioclaw_symbolic.audit import property_audit
 from bioclaw_symbolic.evidence import EntityRef, EvidencePacket, NeighborhoodPacket
 from bioclaw_symbolic.mork import MorkClient
-from bioclaw_symbolic.omegaclaw import omega_neighborhood_payload, omega_revision_probe, omega_spike_payload
+from bioclaw_symbolic.omegaclaw import (
+    omega_neighborhood_payload,
+    omega_path_payload,
+    omega_revision_probe,
+    omega_spike_payload,
+)
 from bioclaw_symbolic.reasoning import load_policy, packet_assessment
 from bioclaw_symbolic.report import evidence_cards_dict, render_evidence_cards
 from bioclaw_symbolic.schema import SchemaRegistry
-from bioclaw_symbolic.schema_path import find_schema_paths
+from bioclaw_symbolic.schema_path import PathInstance, SchemaPath, SchemaPathStep, find_schema_paths
 
 
 class FakeMorkClient(MorkClient):
@@ -475,6 +480,57 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("bioclaw_curation_state", output)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test_bioclaw_omegaclaw_neighborhood_mock.py"
+            path.write_text(output)
+            py_compile.compile(str(path), doraise=True)
+
+    def test_omega_path_payload_uses_schema_path_and_pln_deduction(self) -> None:
+        from bioclaw_symbolic.cli import _omega_output_text
+
+        schema_path = SchemaPath(
+            start_type="gene",
+            target_type="protein",
+            steps=(
+                SchemaPathStep(
+                    edge_name="gene transcript",
+                    edge_label="transcribes_to",
+                    source_type="gene",
+                    target_type="transcript",
+                ),
+                SchemaPathStep(
+                    edge_name="transcript protein",
+                    edge_label="translates_to",
+                    source_type="transcript",
+                    target_type="protein",
+                ),
+            ),
+        )
+        instance = PathInstance(
+            schema_path=schema_path,
+            nodes=(
+                EntityRef("gene", "ENSG00000154059"),
+                EntityRef("transcript", "ENST00000284202"),
+                EntityRef("protein", "Q9P2X3"),
+            ),
+        )
+
+        result = omega_path_payload(
+            instance,
+            load_policy("config/reasoning.yaml"),
+            path_id="path_test",
+        )
+
+        self.assertEqual(result.payload["scope"], "one bounded MORK schema-path instance")
+        self.assertIn("bioclaw_schema_path path_test", result.metta_program)
+        self.assertIn("(transcribes_to (gene ENSG00000154059) (transcript ENST00000284202))", result.metta_program)
+        self.assertIn("(translates_to (transcript ENST00000284202) (protein Q9P2X3))", result.metta_program)
+        self.assertIn("Truth__Deduction", result.metta_program)
+        self.assertIn('(metta "(Truth__Deduction', result.payload["omega_payload"]["omega_skill_call"])
+        output = _omega_output_text(result, "mock-test")
+        self.assertIn("test_bioclaw_omegaclaw_schema_path_mock", output)
+        self.assertIn("bioclaw_schema_path", output)
+        self.assertIn("Truth__Deduction", output)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_bioclaw_omegaclaw_schema_path_mock.py"
             path.write_text(output)
             py_compile.compile(str(path), doraise=True)
 

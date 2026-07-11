@@ -12,6 +12,7 @@ from typing import Any
 from .evidence import EvidencePacket, NeighborhoodPacket
 from .reasoning import SymbolicAssessment, packet_assessment
 from .report import ranked_packets, report_dict
+from .schema_path import PathInstance
 
 
 @dataclass(frozen=True)
@@ -536,6 +537,238 @@ def test_bioclaw_omegaclaw_neighborhood_mock(llm, comm):
 '''
 
 
+def _path_id(instance: PathInstance) -> str:
+    pieces = [
+        instance.schema_path.start_type,
+        *instance.schema_path.edge_labels,
+        instance.schema_path.target_type,
+        *(node.identifier for node in instance.nodes),
+    ]
+    return "path_" + "_".join(_safe_claim_id(piece) for piece in pieces)
+
+
+def _path_default_stv(policy: dict[str, Any]) -> tuple[float, float]:
+    raw = policy.get("default_stv", [1.0, 0.5])
+    try:
+        strength, confidence = float(raw[0]), float(raw[1])
+    except (TypeError, ValueError, IndexError):
+        strength, confidence = 1.0, 0.5
+    return max(0.0, min(1.0, strength)), max(0.0, min(1.0, confidence))
+
+
+def path_skill_expressions(
+    instance: PathInstance,
+    policy: dict[str, Any],
+    *,
+    path_id: str | None = None,
+) -> list[str]:
+    resolved_id = path_id or _path_id(instance)
+    default_stv = _path_default_stv(policy)
+    expressions = [
+        (
+            f"(quote (bioclaw_schema_path {resolved_id} "
+            f"{_metta_string(instance.schema_path.signature())}))"
+        ),
+        f"(quote (bioclaw_path_start {resolved_id} {instance.nodes[0].atom()}))",
+        f"(quote (bioclaw_path_target {resolved_id} {instance.nodes[-1].atom()}))",
+    ]
+
+    step_stvs: list[tuple[float, float]] = []
+    for index, step in enumerate(instance.schema_path.steps):
+        source = instance.nodes[index]
+        target = instance.nodes[index + 1]
+        stv = default_stv
+        step_stvs.append(stv)
+        edge_atom = f"({step.edge_label} {source.atom()} {target.atom()})"
+        expressions.extend(
+            [
+                (
+                    f"(quote (bioclaw_path_edge {resolved_id} {index + 1} "
+                    f"{edge_atom}))"
+                ),
+                (
+                    f"(quote (bioclaw_path_edge_stv {resolved_id} {index + 1} "
+                    f"(stv {stv[0]:.6f} {stv[1]:.6f})))"
+                ),
+                (
+                    f"(quote (bioclaw_path_edge_role {resolved_id} {index + 1} "
+                    f"{_metta_string(step.source_type)} {_metta_string(step.edge_label)} "
+                    f"{_metta_string(step.target_type)}))"
+                ),
+            ]
+        )
+
+    if len(step_stvs) >= 2:
+        for index, (left, right) in enumerate(zip(step_stvs, step_stvs[1:]), start=1):
+            expressions.append(
+                f"(Truth__Deduction "
+                f"(stv {left[0]:.6f} {left[1]:.6f}) "
+                f"(stv {right[0]:.6f} {right[1]:.6f}))"
+            )
+            expressions.append(
+                f"(quote (bioclaw_path_pln_operation {resolved_id} {index} "
+                f"{_metta_string('Truth__Deduction')}))"
+            )
+    else:
+        expressions.append(
+            f"(quote (bioclaw_path_pln_skipped {resolved_id} "
+            f"{_metta_string('path has fewer than two edges')}))"
+        )
+
+    return expressions
+
+
+def metta_program_for_path(
+    instance: PathInstance,
+    policy: dict[str, Any],
+    *,
+    path_id: str | None = None,
+) -> str:
+    resolved_id = path_id or _path_id(instance)
+    lines = [
+        "; BioClaw Phase 2 schema-path symbolic reasoning payload.",
+        "; This payload is generated from one bounded MORK BioAtomspace path instance.",
+        "!(import! &self (library OmegaClaw-Core lib_pln))",
+        "!(import! &self (library OmegaClaw-Core lib_nal))",
+        "",
+        f"; Schema path id: {resolved_id}",
+        f"; Schema path: {instance.schema_path.signature()}",
+        f"; Instance: {instance.to_dict()['path']}",
+        "",
+    ]
+    for expression in path_skill_expressions(instance, policy, path_id=resolved_id):
+        if expression.startswith("(quote ") and expression.endswith(")"):
+            lines.append(expression[len("(quote ") : -1])
+        else:
+            lines.append(f"!{expression}")
+    lines.extend(
+        [
+            "",
+            "; Path-level truth-value propagation currently uses configured default edge STVs",
+            "; when the path traversal itself does not expose edge-level scores/evidence.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def omegaclaw_path_mock_pytest(
+    instance: PathInstance,
+    policy: dict[str, Any],
+    *,
+    path_id: str | None = None,
+) -> str:
+    resolved_id = path_id or _path_id(instance)
+    expressions = path_skill_expressions(instance, policy, path_id=resolved_id)
+    skill_payload = omegaclaw_skill_payload(expressions).strip()
+    skill_commands = _skill_commands_from_payload(skill_payload)
+    required_fragments = [
+        "bioclaw_schema_path",
+        "bioclaw_path_edge",
+        resolved_id,
+        instance.nodes[0].identifier,
+        instance.nodes[-1].identifier,
+    ]
+    pln_expected = len(instance.schema_path.steps) >= 2
+    return f'''"""
+BioClaw Phase 2 OmegaClaw schema-path reasoning mock-loop probe.
+
+Copy this file into OmegaClaw-Core/Autotests/mock/ and run it with the
+existing OmegaClaw mock harness. It verifies that a real schema-valid MORK
+BioAtomspace path instance is dispatched through OmegaClaw's native
+(metta ...) skill path, including PLN path-support propagation calls when
+the path has at least two edges.
+"""
+import subprocess
+import time
+
+from helpers import CONTAINER, Checker, make_prompt, wait_for_skill_call
+
+
+SKILL_PAYLOAD = {skill_payload!r}
+SKILL_COMMANDS = {skill_commands!r}
+REQUIRED_LOG_FRAGMENTS = {required_fragments!r}
+PLN_EXPECTED = {pln_expected!r}
+
+
+def docker_logs():
+    res = subprocess.run(
+        ["docker", "logs", CONTAINER],
+        capture_output=True,
+        text=True,
+    )
+    return (res.stdout or "") + (res.stderr or "")
+
+
+def test_bioclaw_omegaclaw_schema_path_mock(llm, comm):
+    with Checker("BioClaw OmegaClaw schema-path reasoning probe (mock)") as c:
+        print(f"\\n=== BioClaw: OmegaClaw schema-path probe (run-id {{c.run_id}}) ===", flush=True)
+
+        marker = f"BIOCLAW-OMEGA-PATH-{{c.run_id}}"
+        c.add_cleanup_marker(marker)
+
+        prompt = make_prompt(
+            c.run_id,
+            "Run the BioClaw schema-path reasoning payload and acknowledge.",
+        )
+        response = SKILL_COMMANDS + f' (send "{{marker}} dispatched.")'
+        llm.set_answer(prompt, response)
+        if not comm.send_message(prompt):
+            c.fail("comm", "could not deliver prompt within 60s")
+        c.ok("comm", f"run-id={{c.run_id}}")
+
+        c.step("verify schema-path grounding metta call was dispatched")
+        path_arg = wait_for_skill_call(
+            c.run_id,
+            "metta",
+            timeout=60,
+            arg_substr="bioclaw_schema_path",
+        )
+        if path_arg is None:
+            c.fail("schema path dispatched", "no matching (metta ...) call observed")
+        c.ok("schema path dispatched", f"arg={{path_arg[:140]!r}}")
+
+        c.step("verify path edge metta call was dispatched")
+        edge_arg = wait_for_skill_call(
+            c.run_id,
+            "metta",
+            timeout=60,
+            arg_substr="bioclaw_path_edge",
+        )
+        if edge_arg is None:
+            c.fail("path edge dispatched", "no matching (metta ...) call observed")
+        c.ok("path edge dispatched", f"arg={{edge_arg[:140]!r}}")
+
+        if PLN_EXPECTED:
+            c.step("verify PLN path-support metta call was dispatched")
+            pln_arg = wait_for_skill_call(
+                c.run_id,
+                "metta",
+                timeout=60,
+                arg_substr="Truth__Deduction",
+            )
+            if pln_arg is None:
+                c.fail("PLN path support dispatched", "no Truth__Deduction call observed")
+            c.ok("PLN path support dispatched", f"arg={{pln_arg[:140]!r}}")
+        else:
+            c.ok("PLN path support skipped", "path has fewer than two edges")
+
+        c.step("verify schema-path fragments are visible in OmegaClaw logs")
+        deadline = time.time() + 60
+        logs = ""
+        while time.time() < deadline:
+            logs = docker_logs()
+            if all(fragment in logs for fragment in REQUIRED_LOG_FRAGMENTS):
+                break
+            time.sleep(2)
+        missing = [fragment for fragment in REQUIRED_LOG_FRAGMENTS if fragment not in logs]
+        if missing:
+            c.fail("schema path visible", f"missing log fragments: {{missing!r}}")
+        c.ok("schema path visible", "found path grounding fragments in logs")
+
+        c.done()
+'''
+
+
 def revision_probe_program(first: tuple[float, float], second: tuple[float, float]) -> str:
     return "\n".join(
         [
@@ -741,6 +974,48 @@ def omega_neighborhood_payload(
                 "This payload is grounded in a bounded MORK neighborhood, not a global KG inference.",
                 "The emitted atoms represent ranked claims and curation-state labels for OmegaClaw skill dispatch.",
                 "PLN revision is not assumed for neighborhood ranking; exact claim revision remains conditional on comparable truth values.",
+                "Run this through the OmegaClaw mock-loop harness to verify native (metta ...) dispatch.",
+            ],
+        },
+        "engine": _engine_status(program, invoke_engine, engine_command, timeout),
+    }
+    return OmegaClawSpikeResult(payload=payload, metta_program=program)
+
+
+def omega_path_payload(
+    instance: PathInstance,
+    policy: dict[str, Any],
+    *,
+    path_id: str | None = None,
+    invoke_engine: bool = False,
+    engine_command: str = "metta",
+    timeout: int = 30,
+) -> OmegaClawSpikeResult:
+    resolved_id = path_id or _path_id(instance)
+    program = metta_program_for_path(instance, policy, path_id=resolved_id)
+    expressions = path_skill_expressions(instance, policy, path_id=resolved_id)
+    payload = {
+        "phase": "phase_2_schema_path_pln_reasoning",
+        "scope": "one bounded MORK schema-path instance",
+        "path_instance": instance.to_dict(),
+        "path_support": {
+            "path_id": resolved_id,
+            "edge_default_stv": {
+                "strength": _path_default_stv(policy)[0],
+                "confidence": _path_default_stv(policy)[1],
+            },
+            "pln_operation": "Truth__Deduction" if len(instance.schema_path.steps) >= 2 else None,
+            "edge_count": len(instance.schema_path.steps),
+        },
+        "omega_payload": {
+            "path_id": resolved_id,
+            "metta_program": program,
+            "omega_skill_call": omegaclaw_skill_payload(expressions),
+            "omega_mock_test": omegaclaw_path_mock_pytest(instance, policy, path_id=resolved_id),
+            "notes": [
+                "This payload is grounded in one MORK schema-path instance.",
+                "Path-level PLN currently propagates configured edge support over the bounded path.",
+                "This is not global KG inference and does not invent missing path instances.",
                 "Run this through the OmegaClaw mock-loop harness to verify native (metta ...) dispatch.",
             ],
         },

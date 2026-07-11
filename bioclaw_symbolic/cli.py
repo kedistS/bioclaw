@@ -10,7 +10,7 @@ from typing import Any
 from .audit import property_audit
 from .evidence import EntityRef
 from .mork import MorkClient
-from .omegaclaw import omega_neighborhood_payload, omega_revision_probe, omega_spike_payload
+from .omegaclaw import omega_neighborhood_payload, omega_path_payload, omega_revision_probe, omega_spike_payload
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import evidence_cards_dict, render_evidence_cards, render_report, report_dict
 from .schema import SchemaRegistry
@@ -477,6 +477,72 @@ def cmd_schema_path(args: argparse.Namespace) -> int:
     return 0
 
 
+def _path_instances_from_args(args: argparse.Namespace):
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    client = _client(args)
+    start = _resolve_entity_arg(args.entity, client, registry, args.start_type)
+    start_type = args.start_type or start.label
+    paths = find_schema_paths(
+        registry,
+        start_type=start_type,
+        target_type=args.target_type,
+        max_depth=args.max_depth,
+        max_paths=args.max_paths,
+    )
+    candidates = []
+    for schema_path in paths:
+        instances = client.path_instances(
+            schema_path=schema_path,
+            registry=registry,
+            start=start,
+            limit=args.instances_per_path,
+        )
+        for instance in instances:
+            candidates.append(instance)
+    return start, paths, candidates
+
+
+def cmd_omega_path(args: argparse.Namespace) -> int:
+    _, paths, instances = _path_instances_from_args(args)
+    if not paths:
+        raise ValueError(
+            f"schema has no path from {args.start_type or args.entity} to {args.target_type} "
+            f"within depth {args.max_depth}"
+        )
+    if not instances:
+        signatures = "; ".join(path.signature() for path in paths[:5])
+        raise ValueError(
+            "schema path(s) exist, but MORK returned no path instances for this start entity. "
+            f"Schema paths checked: {signatures}"
+        )
+    if args.instance_index < 0 or args.instance_index >= len(instances):
+        raise ValueError(
+            f"--instance-index {args.instance_index} is out of range for "
+            f"{len(instances)} retrieved instance(s)"
+        )
+    policy = load_policy(args.reasoning)
+    result = omega_path_payload(
+        instances[args.instance_index],
+        policy,
+        path_id=args.path_id,
+        invoke_engine=args.invoke_engine,
+        engine_command=args.engine_command,
+        timeout=args.engine_timeout,
+    )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_omega_output_text(result, args.format))
+        if args.format == "mock-test":
+            print(f"wrote OmegaClaw mock test to {target}")
+            return 0
+    if args.format in {"metta", "skill", "mock-test"}:
+        print(_omega_output_text(result, args.format), end="")
+    else:
+        _print_json(result.payload)
+    return 0
+
+
 def cmd_audit_properties(args: argparse.Namespace) -> int:
     client = _client(args)
     registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
@@ -651,6 +717,28 @@ def build_parser() -> argparse.ArgumentParser:
     schema_path.add_argument("--timeout", type=int, default=30)
     schema_path.add_argument("--format", choices=["text", "json"], default="text", help="output format")
     schema_path.set_defaults(func=cmd_schema_path)
+
+    omega_path = sub.add_parser("omega-path", help="marshal a MORK schema-path instance into OmegaClaw PLN path-support atoms")
+    omega_path.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    omega_path.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    omega_path.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    omega_path.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    omega_path.add_argument("--entity", required=True, help="start entity as label:id, or a display name")
+    omega_path.add_argument("--start-type", help="schema start type; defaults to the resolved entity label")
+    omega_path.add_argument("--target-type", required=True, help="target schema node type, e.g. protein, pathway, disease")
+    omega_path.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
+    omega_path.add_argument("--max-paths", type=int, default=20, help="maximum schema paths to inspect")
+    omega_path.add_argument("--instances-per-path", type=int, default=20, help="maximum MORK instances per schema path")
+    omega_path.add_argument("--instance-index", type=int, default=0, help="which retrieved path instance to marshal")
+    omega_path.add_argument("--timeout", type=int, default=30)
+    omega_path.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    omega_path.add_argument("--path-id", help="optional MeTTa path id")
+    omega_path.add_argument("--invoke-engine", action="store_true", help="try to execute the generated payload with the local MeTTa/OmegaClaw runtime")
+    omega_path.add_argument("--engine-command", default="metta", help="command used with --invoke-engine; default: metta")
+    omega_path.add_argument("--engine-timeout", type=int, default=30, help="engine execution timeout in seconds")
+    omega_path.add_argument("--export", help="write the path OmegaClaw payload to a file")
+    omega_path.add_argument("--format", choices=["json", "metta", "skill", "mock-test"], default="json", help="output/export format; skill is the OmegaClaw agent-loop payload, mock-test emits a pytest harness")
+    omega_path.set_defaults(func=cmd_omega_path)
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
