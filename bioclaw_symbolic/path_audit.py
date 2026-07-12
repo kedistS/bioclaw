@@ -19,12 +19,62 @@ class PathAuditEntry:
     trace: dict[str, Any]
     candidates: tuple[HypothesisCandidate, ...]
 
+    @property
+    def category(self) -> str:
+        if self.instance_count == 0:
+            return "missing_coverage"
+        if len(self.schema_path.steps) == 1:
+            return "direct_evidence"
+        return "derived_hypothesis"
+
+    @property
+    def curation_states(self) -> tuple[str, ...]:
+        states = [self.category]
+        if self.instance_count == 0:
+            states.append("schema_path_blocked")
+            states.append("needs_coverage_review")
+            return tuple(states)
+
+        states.append("path_populated")
+        if len(self.schema_path.steps) > 1:
+            states.append("schema_path_support")
+            states.append("path_support_propagation_candidate")
+        if any("contains_multi_source_support" in candidate.labels for candidate in self.candidates):
+            states.append("contains_multi_source_support")
+        if any("contains_single_source_support" in candidate.labels for candidate in self.candidates):
+            states.append("contains_single_source_support")
+        if any("evidence_code_review" in candidate.symbolic_operations for candidate in self.candidates):
+            states.append("evidence_code_review")
+        if any("source_support_review" in candidate.symbolic_operations for candidate in self.candidates):
+            states.append("source_support_review")
+        if any("actionable" in candidate.labels for candidate in self.candidates):
+            states.append("actionable")
+        if not self.candidates:
+            states.append("no_rendered_candidates")
+        return tuple(dict.fromkeys(states))
+
+    @property
+    def rank_score(self) -> float:
+        if self.instance_count == 0:
+            return 0.0
+        if not self.candidates:
+            return 0.1
+        confidence = max(candidate.support_estimate[1] for candidate in self.candidates)
+        source_bonus = 0.1 if "contains_multi_source_support" in self.curation_states else 0.0
+        path_bonus = 0.05 if self.category == "derived_hypothesis" else 0.0
+        instance_bonus = min(self.instance_count, 10) * 0.01
+        return round(min(1.0, confidence + source_bonus + path_bonus + instance_bonus), 6)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "target_type": self.target_type,
             "schema_path": self.schema_path.to_dict(),
             "instance_count": self.instance_count,
             "status": self.status,
+            "category": self.category,
+            "curation_states": list(self.curation_states),
+            "rank_score": self.rank_score,
+            "blocked_reason": _blocked_reason(self.trace) if self.instance_count == 0 else None,
             "trace": self.trace,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
@@ -45,9 +95,23 @@ class PathAudit:
     def blocked_entries(self) -> list[PathAuditEntry]:
         return [entry for entry in self.entries if entry.instance_count == 0]
 
+    def evidence_entries(self) -> list[PathAuditEntry]:
+        return [entry for entry in self.entries if entry.category == "direct_evidence"]
+
+    def hypothesis_entries(self) -> list[PathAuditEntry]:
+        return [entry for entry in self.entries if entry.category == "derived_hypothesis"]
+
+    def ranked_entries(self) -> list[PathAuditEntry]:
+        return sorted(
+            self.populated_entries(),
+            key=lambda entry: (-entry.rank_score, entry.category, entry.target_type, entry.schema_path.signature()),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         populated = self.populated_entries()
         blocked = self.blocked_entries()
+        evidence = self.evidence_entries()
+        hypotheses = self.hypothesis_entries()
         return {
             "start": {"label": self.start.label, "id": self.start.identifier, "schema_type": self.start_type},
             "target_types": list(self.target_types),
@@ -56,6 +120,24 @@ class PathAudit:
             "schema_path_count": len(self.entries),
             "populated_path_count": len(populated),
             "blocked_path_count": len(blocked),
+            "direct_evidence_path_count": len(evidence),
+            "derived_hypothesis_path_count": len(hypotheses),
+            "reasoning_summary": {
+                "direct_evidence_paths": len(evidence),
+                "derived_hypothesis_paths": len(hypotheses),
+                "missing_coverage_paths": len(blocked),
+                "top_ranked_paths": [
+                    {
+                        "schema_path": entry.schema_path.signature(),
+                        "category": entry.category,
+                        "target_type": entry.target_type,
+                        "instances": entry.instance_count,
+                        "rank_score": entry.rank_score,
+                        "curation_states": list(entry.curation_states),
+                    }
+                    for entry in self.ranked_entries()[:10]
+                ],
+            },
             "entries": [entry.to_dict() for entry in self.entries],
         }
 
@@ -162,7 +244,7 @@ def build_path_audit(
                     candidates=tuple(candidates),
                 )
             )
-    entries.sort(key=lambda entry: (entry.instance_count == 0, entry.target_type, entry.schema_path.signature()))
+    entries.sort(key=lambda entry: (-entry.rank_score, entry.instance_count == 0, entry.target_type, entry.schema_path.signature()))
     return PathAudit(
         start=start,
         start_type=start_type,
@@ -197,6 +279,8 @@ def render_path_audit(
 ) -> str:
     populated = audit.populated_entries()
     blocked = audit.blocked_entries()
+    evidence = audit.evidence_entries()
+    hypotheses = audit.hypothesis_entries()
     title = f"BioClaw schema-path audit for {audit.start.label}:{audit.start.identifier}"
     if output_format == "markdown":
         lines = [
@@ -206,15 +290,26 @@ def render_path_audit(
                 f"Populated paths: {len(populated)} / {len(audit.entries)} schema path(s). "
                 f"Blocked paths: {len(blocked)}."
             ),
+            "",
+            "## Reasoning Summary",
+            f"- Direct evidence paths: {len(evidence)}",
+            f"- Derived hypothesis paths: {len(hypotheses)}",
+            f"- Missing coverage paths: {len(blocked)}",
         ]
-        for entry in populated:
+        ranked = audit.ranked_entries()
+        if ranked:
+            lines.extend(["", "## Ranked Curator Candidates"])
+        for entry in ranked:
             lines.extend(
                 [
                     "",
-                    f"## {entry.schema_path.signature()}",
+                    f"### {entry.schema_path.signature()}",
                     f"- Target type: {entry.target_type}",
+                    f"- Category: {entry.category}",
                     f"- Instances returned: {entry.instance_count}",
+                    f"- Rank score: {entry.rank_score:.3f}",
                     f"- Status: {entry.status}",
+                    f"- Curation states: {', '.join(entry.curation_states)}",
                 ]
             )
             for candidate in entry.candidates:
@@ -229,7 +324,7 @@ def render_path_audit(
                     ]
                 )
         if show_blocked and blocked:
-            lines.extend(["", "## Blocked Schema Paths"])
+            lines.extend(["", "## Missing Coverage / Blocked Schema Paths"])
             for entry in blocked:
                 lines.append(f"- {entry.schema_path.signature()}: {_blocked_reason(entry.trace)}")
         return "\n".join(lines) + "\n"
@@ -241,15 +336,25 @@ def render_path_audit(
             f"Populated paths: {len(populated)} / {len(audit.entries)} schema path(s). "
             f"Blocked paths: {len(blocked)}."
         ),
+        "Reasoning summary:",
+        f"  Direct evidence paths: {len(evidence)}",
+        f"  Derived hypothesis paths: {len(hypotheses)}",
+        f"  Missing coverage paths: {len(blocked)}",
     ]
-    for entry in populated:
+    ranked = audit.ranked_entries()
+    if ranked:
+        lines.extend(["", "Ranked curator candidates:"])
+    for entry in ranked:
         lines.extend(
             [
                 "",
                 entry.schema_path.signature(),
                 f"  Target type: {entry.target_type}",
+                f"  Category: {entry.category}",
                 f"  Instances returned: {entry.instance_count}",
+                f"  Rank score: {entry.rank_score:.3f}",
                 f"  Status: {entry.status}",
+                f"  Curation states: {', '.join(entry.curation_states)}",
             ]
         )
         for candidate in entry.candidates:

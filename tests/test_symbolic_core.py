@@ -40,6 +40,11 @@ class FakeMorkClient(MorkClient):
             return ["(gene ENSG00000154059)"]
         if pattern == "(gene TP53)":
             return ["(gene TP53)"]
+        if pattern == "(gene ENSG00000141510)":
+            return ["(gene ENSG00000141510)"]
+        if pattern == "(participates_in (gene ENSG00000141510) (pathway $next_id))":
+            tag = template.split(maxsplit=1)[0].lstrip("(")
+            return [f"({tag} R-HSA-1)"]
         return []
 
     def transform(self, patterns: list[str], template: str) -> list[str]:
@@ -951,9 +956,86 @@ class SymbolicCoreTests(unittest.TestCase):
 
         self.assertEqual(data["populated_path_count"], 1)
         self.assertEqual(data["blocked_path_count"], 0)
+        self.assertEqual(data["direct_evidence_path_count"], 0)
+        self.assertEqual(data["derived_hypothesis_path_count"], 1)
+        self.assertEqual(data["reasoning_summary"]["derived_hypothesis_paths"], 1)
+        self.assertEqual(data["entries"][0]["category"], "derived_hypothesis")
+        self.assertIn("path_support_propagation_candidate", data["entries"][0]["curation_states"])
         self.assertIn("gene -[transcribes_to]-> transcript -[translates_to]-> protein", text)
+        self.assertIn("Reasoning Summary", text)
+        self.assertIn("Ranked Curator Candidates", text)
+        self.assertIn("Derived hypothesis paths: 1", text)
         self.assertIn("Hypothesis candidate", text)
         self.assertIn("Truth__Deduction", text)
+
+    def test_path_audit_separates_direct_evidence_and_missing_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schema_path = Path(tmp) / "schema.yaml"
+            policy_path = Path(tmp) / "roles.yaml"
+            schema_path.write_text(
+                textwrap.dedent(
+                    """
+                    gene:
+                      represented_as: node
+                      input_label: gene
+                    pathway:
+                      represented_as: node
+                      input_label: pathway
+                    disease:
+                      represented_as: node
+                      input_label: disease
+                    gene pathway:
+                      represented_as: edge
+                      input_label: participates_in
+                      source: gene
+                      target: pathway
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                    gene disease:
+                      represented_as: edge
+                      input_label: is_implicated_in
+                      source: gene
+                      target: disease
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                    """
+                )
+            )
+            policy_path.write_text(
+                textwrap.dedent(
+                    """
+                    edge_property_roles:
+                      source:
+                        names: [source]
+                    """
+                )
+            )
+            registry = SchemaRegistry.from_file(schema_path, policy_path)
+
+        audit = build_path_audit(
+            FakeMorkClient(),
+            registry,
+            EntityRef("gene", "ENSG00000141510"),
+            "gene",
+            load_policy("config/reasoning.yaml"),
+            all_target_types=True,
+            max_depth=1,
+        )
+        data = audit.to_dict()
+        markdown = render_path_audit(audit, output_format="markdown", show_blocked=True)
+        entries = {entry["schema_path"]["signature"]: entry for entry in data["entries"]}
+
+        self.assertEqual(data["direct_evidence_path_count"], 1)
+        self.assertEqual(data["derived_hypothesis_path_count"], 0)
+        self.assertEqual(data["blocked_path_count"], 1)
+        self.assertEqual(entries["gene -[participates_in]-> pathway"]["category"], "direct_evidence")
+        self.assertEqual(entries["gene -[is_implicated_in]-> disease"]["category"], "missing_coverage")
+        self.assertIn("needs_coverage_review", entries["gene -[is_implicated_in]-> disease"]["curation_states"])
+        self.assertIn("Missing Coverage / Blocked Schema Paths", markdown)
 
 
 if __name__ == "__main__":
