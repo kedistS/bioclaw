@@ -18,6 +18,7 @@ from bioclaw_symbolic.omegaclaw import (
     omega_spike_payload,
 )
 from bioclaw_symbolic.reasoning import load_policy, packet_assessment
+from bioclaw_symbolic.path_audit import build_path_audit, render_path_audit
 from bioclaw_symbolic.report import evidence_cards_dict, render_evidence_cards
 from bioclaw_symbolic.schema import SchemaRegistry
 from bioclaw_symbolic.schema_path import PathInstance, SchemaPath, SchemaPathStep, find_schema_paths
@@ -88,6 +89,25 @@ class FakeMorkClient(MorkClient):
                 limit=limit,
             )
         return NeighborhoodPacket(focus=focus, edge_type=edge_type, packets=[], limit=limit)
+
+    def evidence_packet(
+        self,
+        edge_type: str,
+        source: EntityRef,
+        target: EntityRef,
+        annotations: list[str] | None = None,
+        annotation_roles: dict[str, str] | None = None,
+    ) -> EvidencePacket:
+        if edge_type in {"transcribes_to", "translates_to", "participates_in"}:
+            return EvidencePacket(
+                edge_type=edge_type,
+                source=source,
+                target=target,
+                exists=True,
+                annotations={"source": ["TEST_SOURCE"]},
+                annotation_roles={"source": "source"},
+            )
+        return EvidencePacket(edge_type=edge_type, source=source, target=target, exists=False)
 
 
 class SymbolicCoreTests(unittest.TestCase):
@@ -868,6 +888,72 @@ class SymbolicCoreTests(unittest.TestCase):
             "relation_missing_in_bounded_retrieval",
             relations["promoter -[associated_with]-> gene"].curation_states,
         )
+
+    def test_path_audit_builds_generic_schema_path_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schema_path = Path(tmp) / "schema.yaml"
+            policy_path = Path(tmp) / "roles.yaml"
+            schema_path.write_text(
+                textwrap.dedent(
+                    """
+                    gene:
+                      represented_as: node
+                      input_label: gene
+                    transcript:
+                      represented_as: node
+                      input_label: transcript
+                    protein:
+                      represented_as: node
+                      input_label: protein
+                    gene transcript:
+                      represented_as: edge
+                      input_label: transcribes_to
+                      source: gene
+                      target: transcript
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                    transcript protein:
+                      represented_as: edge
+                      input_label: translates_to
+                      source: transcript
+                      target: protein
+                      properties:
+                        source:
+                          type: str
+                          biolink: knowledge_source
+                    """
+                )
+            )
+            policy_path.write_text(
+                textwrap.dedent(
+                    """
+                    edge_property_roles:
+                      source:
+                        names: [source]
+                    """
+                )
+            )
+            registry = SchemaRegistry.from_file(schema_path, policy_path)
+
+        audit = build_path_audit(
+            FakeMorkClient(),
+            registry,
+            EntityRef("gene", "ENSG00000154059"),
+            "gene",
+            load_policy("config/reasoning.yaml"),
+            target_type="protein",
+            max_depth=3,
+        )
+        data = audit.to_dict()
+        text = render_path_audit(audit, output_format="markdown")
+
+        self.assertEqual(data["populated_path_count"], 1)
+        self.assertEqual(data["blocked_path_count"], 0)
+        self.assertIn("gene -[transcribes_to]-> transcript -[translates_to]-> protein", text)
+        self.assertIn("Hypothesis candidate", text)
+        self.assertIn("Truth__Deduction", text)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from .evidence import EntityRef
 from .hypothesis import build_hypothesis_candidate, render_hypotheses
 from .mork import MorkClient
 from .omegaclaw import omega_neighborhood_payload, omega_path_payload, omega_revision_probe, omega_spike_payload
+from .path_audit import build_path_audit, render_path_audit
 from .reasoning import load_policy, neighborhood_assessment, packet_assessment
 from .report import evidence_cards_dict, render_evidence_cards, render_report, report_dict
 from .schema import SchemaRegistry
@@ -735,6 +736,50 @@ def cmd_entity_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_path_audit(args: argparse.Namespace) -> int:
+    if not args.target_type and not args.all_target_types:
+        raise ValueError("provide --target-type or --all-target-types")
+    client = _client(args)
+    registry = SchemaRegistry.from_file(args.schema, args.schema_policy)
+    start = _resolve_entity_arg(args.entity, client, registry, args.start_type)
+    start_type = args.start_type or start.label
+    audit = build_path_audit(
+        client,
+        registry,
+        start,
+        start_type,
+        load_policy(args.reasoning),
+        target_type=args.target_type,
+        all_target_types=args.all_target_types,
+        max_depth=args.max_depth,
+        max_paths_per_target=args.max_paths_per_target,
+        instances_per_path=args.instances_per_path,
+        candidates_per_path=args.candidates_per_path,
+    )
+    if args.only_populated:
+        entries = [entry for entry in audit.to_dict()["entries"] if entry["instance_count"] > 0]
+        data = audit.to_dict()
+        data["entries"] = entries
+    else:
+        data = audit.to_dict()
+    if args.format == "json":
+        output = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    else:
+        output = render_path_audit(
+            audit,
+            output_format=args.format,
+            show_blocked=args.show_blocked,
+        )
+    if args.export:
+        target = Path(args.export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output)
+        print(f"wrote path audit to {target}")
+        return 0
+    print(output, end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bioclaw-symbolic")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -948,6 +993,27 @@ def build_parser() -> argparse.ArgumentParser:
     entity_audit.add_argument("--export", help="write entity audit to a file")
     entity_audit.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
     entity_audit.set_defaults(func=cmd_entity_audit)
+
+    path_audit = sub.add_parser("path-audit", help="audit schema-valid paths from one entity to one or more target types")
+    path_audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8027")
+    path_audit.add_argument("--namespace", default="auto", help="MORK namespace wrapper; default auto tries annotation, default, then raw; use '-' for none")
+    path_audit.add_argument("--schema", required=True, help="BioCypher schema YAML")
+    path_audit.add_argument("--schema-policy", default=DEFAULT_SCHEMA_POLICY, help="schema role policy YAML")
+    path_audit.add_argument("--entity", required=True, help="start entity as label:id, or a display name")
+    path_audit.add_argument("--start-type", help="schema start type; defaults to the resolved entity label")
+    path_audit.add_argument("--target-type", help="target schema node type, e.g. protein, pathway, disease")
+    path_audit.add_argument("--all-target-types", action="store_true", help="inspect schema paths from the start type to every other node type")
+    path_audit.add_argument("--max-depth", type=int, default=3, help="maximum schema path length")
+    path_audit.add_argument("--max-paths-per-target", type=int, default=10, help="maximum schema paths to inspect per target type")
+    path_audit.add_argument("--instances-per-path", type=int, default=10, help="maximum MORK instances per schema path")
+    path_audit.add_argument("--candidates-per-path", type=int, default=3, help="maximum traceable candidates to render per populated path")
+    path_audit.add_argument("--only-populated", action="store_true", help="in JSON output, include only paths with instances")
+    path_audit.add_argument("--show-blocked", action="store_true", help="include blocked schema paths in text/markdown output")
+    path_audit.add_argument("--timeout", type=int, default=30)
+    path_audit.add_argument("--reasoning", default="config/reasoning.yaml", help="reasoning policy YAML")
+    path_audit.add_argument("--export", help="write path audit to a file")
+    path_audit.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="output/export format")
+    path_audit.set_defaults(func=cmd_path_audit)
 
     audit = sub.add_parser("audit-properties", help="compare schema-declared edge properties with observed MORK annotations")
     audit.add_argument("--mork", required=True, help="MORK base URL, e.g. http://localhost:8037")
