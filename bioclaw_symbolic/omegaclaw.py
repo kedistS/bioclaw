@@ -622,7 +622,7 @@ def metta_program_for_path(
 ) -> str:
     resolved_id = path_id or _path_id(instance)
     lines = [
-        "; BioClaw Phase 2 schema-path symbolic reasoning payload.",
+        "; BioClaw Phase 2 schema-path grounding payload.",
         "; This payload is generated from one bounded MORK BioAtomspace path instance.",
         "!(import! &self (library OmegaClaw-Core lib_pln))",
         "!(import! &self (library OmegaClaw-Core lib_nal))",
@@ -640,8 +640,8 @@ def metta_program_for_path(
     lines.extend(
         [
             "",
-            "; PLN path propagation was skipped because this path payload has topology only.",
-            "; Add edge-level data-derived STVs before asking OmegaClaw to propagate support.",
+        "; PLN path propagation was skipped because this path payload has topology only.",
+        "; Add edge-level data-derived STVs before asking OmegaClaw to propagate support.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -666,13 +666,13 @@ def omegaclaw_path_mock_pytest(
     ]
     pln_expected = any("Truth__Deduction" in expression for expression in expressions)
     return f'''"""
-BioClaw Phase 2 OmegaClaw schema-path reasoning mock-loop probe.
+BioClaw Phase 2 OmegaClaw schema-path grounding mock-loop probe.
 
 Copy this file into OmegaClaw-Core/Autotests/mock/ and run it with the
 existing OmegaClaw mock harness. It verifies that a real schema-valid MORK
 BioAtomspace path instance is dispatched through OmegaClaw's native
-(metta ...) skill path, including PLN path-support propagation calls when
-the path has at least two edges.
+(metta ...) skill path. PLN path-support propagation is expected only when
+data-derived edge STVs are available.
 """
 import subprocess
 import time
@@ -696,7 +696,7 @@ def docker_logs():
 
 
 def test_bioclaw_omegaclaw_schema_path_mock(llm, comm):
-    with Checker("BioClaw OmegaClaw schema-path reasoning probe (mock)") as c:
+    with Checker("BioClaw OmegaClaw schema-path grounding probe (mock)") as c:
         print(f"\\n=== BioClaw: OmegaClaw schema-path probe (run-id {{c.run_id}}) ===", flush=True)
 
         marker = f"BIOCLAW-OMEGA-PATH-{{c.run_id}}"
@@ -704,7 +704,7 @@ def test_bioclaw_omegaclaw_schema_path_mock(llm, comm):
 
         prompt = make_prompt(
             c.run_id,
-            "Run the BioClaw schema-path reasoning payload and acknowledge.",
+            "Run the BioClaw schema-path grounding payload and acknowledge.",
         )
         response = SKILL_COMMANDS + f' (send "{{marker}} dispatched.")'
         llm.set_answer(prompt, response)
@@ -995,7 +995,7 @@ def omega_path_payload(
     program = metta_program_for_path(instance, policy, path_id=resolved_id)
     expressions = path_skill_expressions(instance, policy, path_id=resolved_id)
     payload = {
-        "phase": "phase_2_schema_path_pln_reasoning",
+        "phase": "phase_2_schema_path_grounding",
         "scope": "one bounded MORK schema-path instance",
         "path_instance": instance.to_dict(),
         "path_support": {
