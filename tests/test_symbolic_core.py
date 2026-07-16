@@ -468,9 +468,11 @@ class SymbolicCoreTests(unittest.TestCase):
         result = omega_spike_payload(packet, load_policy("config/reasoning.yaml"), claim_id="claim_test")
 
         query_text = "\n".join(result.payload["omega_payload"]["candidate_pln_queries"])
+        self.assertIn("Truth__Revision", query_text)
         self.assertIn("|~", query_text)
         self.assertIn("(stv 0.400000 0.400000)", query_text)
         self.assertIn("(stv 0.800000 0.800000)", query_text)
+        self.assertIn('(metta "(Truth__Revision', result.payload["omega_payload"]["omega_skill_call"])
         self.assertIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
 
     def test_omega_revision_probe_contains_direct_and_inference_surfaces(self) -> None:
@@ -581,6 +583,7 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("bioclaw_neighborhood neighborhood_test", result.metta_program)
         self.assertIn("bioclaw_ranked_claim neighborhood_test 1", result.metta_program)
         self.assertIn("bioclaw_curation_state", result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn('(metta "(|-', result.payload["omega_payload"]["omega_skill_call"])
         self.assertIn("multi_source", result.payload["omega_payload"]["omega_skill_call"])
         self.assertIn("actionable", result.payload["omega_payload"]["omega_skill_call"])
         output = _omega_output_text(result, "mock-test")
@@ -634,7 +637,12 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("(transcribes_to (gene ENSG00000154059) (transcript ENST00000284202))", result.metta_program)
         self.assertIn("(translates_to (transcript ENST00000284202) (protein Q9P2X3))", result.metta_program)
         self.assertIn("Truth__Deduction", result.metta_program)
+        self.assertIn("|~", result.metta_program)
+        self.assertIn("|-", result.metta_program)
+        self.assertIn("(Truth__Deduction (stv 1.000000 0.500000) (stv 1.000000 0.500000) (stv 1.000000 0.500000) (stv 1.000000 0.500000) (stv 1.000000 0.500000))", result.metta_program)
         self.assertIn('(metta "(Truth__Deduction', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn('(metta "(|-', result.payload["omega_payload"]["omega_skill_call"])
         output = _omega_output_text(result, "mock-test")
         self.assertIn("test_bioclaw_omegaclaw_schema_path_mock", output)
         self.assertIn("bioclaw_schema_path", output)

@@ -69,7 +69,7 @@ assessment.
 
 ## Current Status
 
-### Completed Or Partially Completed
+### Completed
 
 - Schema-aware extraction foundation is implemented.
 - Exact-edge MORK evidence packet extraction is implemented.
@@ -80,18 +80,26 @@ assessment.
 - Exact packet dispatch through OmegaClaw `(metta ...)` mock-loop was proven.
 - Bounded neighborhood curation-state atoms were dispatched through OmegaClaw
   `(metta ...)`.
+- Exact-claim PLN revision payloads are implemented for packets with multiple
+  comparable truth values. BioClaw emits both direct `Truth__Revision` calls
+  and public `|~` calls while preserving the grounded packet atoms.
+- Schema-path symbolic payloads are implemented for bounded MORK path
+  instances. BioClaw emits path grounding atoms, valid five-STV
+  `Truth__Deduction` calls, public `|~` calls, and public `|-` NAL calls for
+  path propagation/state reasoning.
+- NAL-style curation-state payloads are implemented for packet, neighborhood,
+  and path states through public `|-` calls plus traceable state atoms.
 - Evidence cards and JSON/CSV/markdown exports exist, but these are Phase 3
   presentation artifacts and should not be mistaken for new reasoning.
 
 ### Not Yet Done
 
-- Real Phase 2 schema-path PLN reasoning is not implemented.
-- Path-level support propagation is not implemented.
-- NAL-style curation-state reasoning is not implemented; current labels are
-  packet-local Python assessment labels.
-- Exact-claim PLN revision is only partially implemented/proven and applies
-  only when comparable truth values exist.
-- Representative validation across relation classes is incomplete.
+- End-to-end OmegaClaw mock-loop/integration execution still needs to be run
+  on the server for the generated packet, neighborhood, and path payloads.
+- BioClaw currently emits symbolic payloads and expected operations, but it
+  does not yet parse returned OmegaClaw truth values back into curator reports.
+- Representative validation across relation classes should continue before
+  Phase 3 is treated as complete.
 
 ## Phase 1: Schema-Aware Evidence Extraction
 
