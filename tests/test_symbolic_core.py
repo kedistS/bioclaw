@@ -455,14 +455,14 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn('(metta "(quote (bioclaw_stv', result.payload["omega_payload"]["omega_skill_call"])
         self.assertNotIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
 
-    def test_omega_spike_generates_pln_revision_candidate_for_comparable_scores(self) -> None:
+    def test_omega_spike_generates_pln_revision_candidate_for_comparable_truth_values(self) -> None:
         packet = EvidencePacket(
             edge_type="interacts_with",
             source=EntityRef("protein", "P20645"),
             target=EntityRef("protein", "P51151"),
             exists=True,
-            annotations={"score": ["0.4", "0.8"]},
-            annotation_roles={"score": "score"},
+            annotations={"score": ["0.4", "0.8"], "confidence": ["0.6", "0.9"]},
+            annotation_roles={"score": "score", "confidence": "confidence"},
         )
 
         result = omega_spike_payload(packet, load_policy("config/reasoning.yaml"), claim_id="claim_test")
@@ -470,8 +470,8 @@ class SymbolicCoreTests(unittest.TestCase):
         query_text = "\n".join(result.payload["omega_payload"]["candidate_pln_queries"])
         self.assertIn("Truth__Revision", query_text)
         self.assertIn("|~", query_text)
-        self.assertIn("(stv 0.400000 0.400000)", query_text)
-        self.assertIn("(stv 0.800000 0.800000)", query_text)
+        self.assertIn("(stv 0.400000 0.600000)", query_text)
+        self.assertIn("(stv 0.800000 0.900000)", query_text)
         self.assertIn('(metta "(Truth__Revision', result.payload["omega_payload"]["omega_skill_call"])
         self.assertIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
 
@@ -583,7 +583,7 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("bioclaw_neighborhood neighborhood_test", result.metta_program)
         self.assertIn("bioclaw_ranked_claim neighborhood_test 1", result.metta_program)
         self.assertIn("bioclaw_curation_state", result.payload["omega_payload"]["omega_skill_call"])
-        self.assertIn('(metta "(|-', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertNotIn('(metta "(|-', result.payload["omega_payload"]["omega_skill_call"])
         self.assertIn("multi_source", result.payload["omega_payload"]["omega_skill_call"])
         self.assertIn("actionable", result.payload["omega_payload"]["omega_skill_call"])
         output = _omega_output_text(result, "mock-test")
@@ -596,7 +596,7 @@ class SymbolicCoreTests(unittest.TestCase):
             path.write_text(output)
             py_compile.compile(str(path), doraise=True)
 
-    def test_omega_path_payload_uses_schema_path_and_pln_deduction(self) -> None:
+    def test_omega_path_payload_keeps_topology_only_paths_out_of_pln(self) -> None:
         from bioclaw_symbolic.cli import _omega_output_text
 
         schema_path = SchemaPath(
@@ -636,17 +636,17 @@ class SymbolicCoreTests(unittest.TestCase):
         self.assertIn("bioclaw_schema_path path_test", result.metta_program)
         self.assertIn("(transcribes_to (gene ENSG00000154059) (transcript ENST00000284202))", result.metta_program)
         self.assertIn("(translates_to (transcript ENST00000284202) (protein Q9P2X3))", result.metta_program)
-        self.assertIn("Truth__Deduction", result.metta_program)
-        self.assertIn("|~", result.metta_program)
-        self.assertIn("|-", result.metta_program)
-        self.assertIn("(Truth__Deduction (stv 1.000000 0.500000) (stv 1.000000 0.500000) (stv 1.000000 0.500000) (stv 1.000000 0.500000) (stv 1.000000 0.500000))", result.metta_program)
-        self.assertIn('(metta "(Truth__Deduction', result.payload["omega_payload"]["omega_skill_call"])
-        self.assertIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
-        self.assertIn('(metta "(|-', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertIn("bioclaw_path_pln_skipped", result.metta_program)
+        self.assertIn("no data-derived edge STVs", result.metta_program)
+        self.assertNotIn("Truth__Deduction", result.metta_program)
+        self.assertNotIn('(metta "(Truth__Deduction', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertNotIn('(metta "(|~', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertNotIn('(metta "(|-', result.payload["omega_payload"]["omega_skill_call"])
+        self.assertEqual(result.payload["path_support"]["pln_status"], "skipped_no_data_derived_edge_stvs")
         output = _omega_output_text(result, "mock-test")
         self.assertIn("test_bioclaw_omegaclaw_schema_path_mock", output)
         self.assertIn("bioclaw_schema_path", output)
-        self.assertIn("Truth__Deduction", output)
+        self.assertIn("PLN_EXPECTED = False", output)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test_bioclaw_omegaclaw_schema_path_mock.py"
             path.write_text(output)

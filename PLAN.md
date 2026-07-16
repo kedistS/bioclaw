@@ -81,14 +81,14 @@ assessment.
 - Bounded neighborhood curation-state atoms were dispatched through OmegaClaw
   `(metta ...)`.
 - Exact-claim PLN revision payloads are implemented for packets with multiple
-  comparable truth values. BioClaw emits both direct `Truth__Revision` calls
-  and public `|~` calls while preserving the grounded packet atoms.
-- Schema-path symbolic payloads are implemented for bounded MORK path
-  instances. BioClaw emits path grounding atoms, valid five-STV
-  `Truth__Deduction` calls, public `|~` calls, and public `|-` NAL calls for
-  path propagation/state reasoning.
-- NAL-style curation-state payloads are implemented for packet, neighborhood,
-  and path states through public `|-` calls plus traceable state atoms.
+  comparable, data-derived truth values. A score alone is not treated as both
+  strength and confidence. BioClaw emits direct `Truth__Revision` and public
+  `|~` calls only when explicit comparable STVs are available.
+- Schema-path grounding payloads are implemented for bounded MORK path
+  instances. Topology-only paths emit traceable path atoms and an explicit PLN
+  skip reason; they do not emit fake `Truth__Deduction` calls.
+- Packet, neighborhood, and path curation-state atoms are implemented as
+  traceable representation. They are not yet NAL reasoning.
 - Evidence cards and JSON/CSV/markdown exports exist, but these are Phase 3
   presentation artifacts and should not be mistaken for new reasoning.
 
@@ -98,6 +98,10 @@ assessment.
   on the server for the generated packet, neighborhood, and path payloads.
 - BioClaw currently emits symbolic payloads and expected operations, but it
   does not yet parse returned OmegaClaw truth values back into curator reports.
+- Path-level PLN support propagation is not implemented until edge-level
+  data-derived STVs can be attached to each path edge.
+- NAL-style curation-state reasoning is not implemented. Current curation
+  states are grounded audit labels, not inferred NAL conclusions.
 - Representative validation across relation classes should continue before
   Phase 3 is treated as complete.
 
@@ -173,12 +177,12 @@ Phase 2 is the current priority.
 Implement PLN-style evidence revision for exact claims supported by multiple
 comparable truth values.
 
-Use this only when the extracted packet contains semantically comparable
-support for the same bounded claim, for example:
+Use this only when the extracted packet contains semantically comparable,
+data-derived truth values for the same bounded claim, for example:
 
 ```text
-(claim A) source_1 score/confidence x
-(claim A) source_2 score/confidence y
+(claim A) source_1 strength x confidence c1
+(claim A) source_2 strength y confidence c2
 ```
 
 Required behavior:
@@ -187,7 +191,8 @@ Required behavior:
 - call OmegaClaw's real symbolic surface, not only Python math;
 - emit `Truth__Revision` or `|~` calls where appropriate;
 - report when revision is not applicable because there is only one comparable
-  truth value.
+  truth value, or because the packet has a score without an independent
+  confidence value.
 
 Important: exact-claim revision is not the main BioClaw reasoning story. It is
 one supported mode.
@@ -207,9 +212,11 @@ This is the next implementation target.
 Required behavior:
 
 - retrieve explicit MORK path instances;
-- convert each path edge into truth-valued support;
+- convert each path edge into truth-valued support only when the edge carries
+  data-derived support values;
 - preserve the full path trace;
-- apply OmegaClaw PLN rules beyond revision where meaningful, especially:
+- apply OmegaClaw PLN rules beyond revision where meaningful and grounded in
+  data-derived truth values, especially:
   - `Truth__Deduction` for path support propagation;
   - `Truth__ModusPonens` for rule-like implication over supported facts;
   - `Truth__Abduction` for bounded hypothesis candidates when an observed
@@ -262,6 +269,10 @@ Required behavior:
 - missing evidence should be represented as an audit state, not as evidence of
   biological absence;
 - NAL-style states should support follow-up audit workflows.
+
+Important: Do not emit `|-` calls that merely re-derive labels already
+computed by Python with a constant rule truth value. That is representation,
+not reasoning.
 
 **Estimated deadline:** End of Month 2.
 

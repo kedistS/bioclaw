@@ -32,14 +32,24 @@ def _safe_claim_id(value: str) -> str:
 
 
 def _numeric_stvs(packet: EvidencePacket) -> list[tuple[float, float]]:
-    values: list[tuple[float, float]] = []
-    raw_values = packet.values_by_role("score", "confidence")
-    for raw in raw_values:
+    strengths = _numeric_role_values(packet, "strength") or _numeric_role_values(packet, "score")
+    confidences = _numeric_role_values(packet, "confidence")
+    if not strengths or not confidences:
+        return []
+    return [
+        (strength, confidence)
+        for strength, confidence in zip(strengths, confidences)
+    ]
+
+
+def _numeric_role_values(packet: EvidencePacket, role: str) -> list[float]:
+    values: list[float] = []
+    for raw in packet.values_by_role(role):
         try:
             value = max(0.0, min(1.0, float(raw)))
         except ValueError:
             continue
-        values.append((value, value))
+        values.append(value)
     return values
 
 
@@ -107,27 +117,6 @@ def packet_grounding_skill_expressions(
     claim_id: str,
 ) -> list[str]:
     return [f"(quote {line})" for line in _atom_lines(packet, assessment, claim_id)]
-
-
-def _state_symbol(label: str) -> str:
-    return _safe_claim_id(label).lower()
-
-
-def curation_state_skill_expressions(
-    subject_id: str,
-    labels: list[str] | tuple[str, ...],
-    stv: tuple[float, float],
-) -> list[str]:
-    subject = _safe_claim_id(subject_id)
-    expressions: list[str] = []
-    for label in labels:
-        state = _state_symbol(label)
-        expressions.append(
-            f"(|- ((--> {subject} {state}) {_stv_text(stv)}) "
-            f"((==> (--> {subject} {state}) (--> {subject} curation_state)) "
-            f"(stv 1.000000 0.900000)))"
-        )
-    return expressions
 
 
 def omegaclaw_skill_payload(expressions: list[str]) -> str:
@@ -237,7 +226,6 @@ def omegaclaw_packet_mock_pytest(
 ) -> str:
     expressions = [
         *packet_grounding_skill_expressions(packet, assessment, claim_id),
-        *curation_state_skill_expressions(claim_id, assessment.labels, assessment.stv),
         *packet_skill_expressions(packet),
     ]
     skill_payload = omegaclaw_skill_payload(expressions).strip()
@@ -404,8 +392,6 @@ def neighborhood_skill_expressions(
             expressions.append(
                 f"(quote (bioclaw_curation_state {claim_id} {_metta_string(label)}))"
             )
-        assessment = packet_assessment(item.packet, policy)
-        expressions.extend(curation_state_skill_expressions(claim_id, assessment.labels, assessment.stv))
     return expressions
 
 
@@ -579,53 +565,6 @@ def _path_id(instance: PathInstance) -> str:
     return "path_" + "_".join(_safe_claim_id(piece) for piece in pieces)
 
 
-def _path_default_stv(policy: dict[str, Any]) -> tuple[float, float]:
-    raw = policy.get("default_stv", [1.0, 0.5])
-    try:
-        strength, confidence = float(raw[0]), float(raw[1])
-    except (TypeError, ValueError, IndexError):
-        strength, confidence = 1.0, 0.5
-    return max(0.0, min(1.0, strength)), max(0.0, min(1.0, confidence))
-
-
-def _pln_path_step_expressions(
-    resolved_id: str,
-    index: int,
-    left_node: str,
-    middle_node: str,
-    right_node: str,
-    left_stv: tuple[float, float],
-    right_stv: tuple[float, float],
-    term_stv: tuple[float, float],
-) -> list[str]:
-    return [
-        (
-            f"(Truth__Deduction {_stv_text(term_stv)} {_stv_text(term_stv)} "
-            f"{_stv_text(term_stv)} {_stv_text(left_stv)} {_stv_text(right_stv)})"
-        ),
-        (
-            f"(|~ ((Inheritance {left_node} {middle_node}) {_stv_text(left_stv)}) "
-            f"((Inheritance {middle_node} {right_node}) {_stv_text(right_stv)}))"
-        ),
-        (
-            f"(|- ((--> {left_node} {middle_node}) {_stv_text(left_stv)}) "
-            f"((--> {middle_node} {right_node}) {_stv_text(right_stv)}))"
-        ),
-        (
-            f"(quote (bioclaw_path_pln_operation {resolved_id} {index} "
-            f"{_metta_string('Truth__Deduction')}))"
-        ),
-        (
-            f"(quote (bioclaw_path_pln_public_surface {resolved_id} {index} "
-            f"{_metta_string('|~')}))"
-        ),
-        (
-            f"(quote (bioclaw_path_nal_public_surface {resolved_id} {index} "
-            f"{_metta_string('|-')}))"
-        ),
-    ]
-
-
 def path_skill_expressions(
     instance: PathInstance,
     policy: dict[str, Any],
@@ -633,7 +572,6 @@ def path_skill_expressions(
     path_id: str | None = None,
 ) -> list[str]:
     resolved_id = path_id or _path_id(instance)
-    default_stv = _path_default_stv(policy)
     expressions = [
         (
             f"(quote (bioclaw_schema_path {resolved_id} "
@@ -643,22 +581,15 @@ def path_skill_expressions(
         f"(quote (bioclaw_path_target {resolved_id} {instance.nodes[-1].atom()}))",
     ]
 
-    step_stvs: list[tuple[float, float]] = []
     for index, step in enumerate(instance.schema_path.steps):
         source = instance.nodes[index]
         target = instance.nodes[index + 1]
-        stv = default_stv
-        step_stvs.append(stv)
         edge_atom = f"({step.edge_label} {source.atom()} {target.atom()})"
         expressions.extend(
             [
                 (
                     f"(quote (bioclaw_path_edge {resolved_id} {index + 1} "
                     f"{edge_atom}))"
-                ),
-                (
-                    f"(quote (bioclaw_path_edge_stv {resolved_id} {index + 1} "
-                    f"(stv {stv[0]:.6f} {stv[1]:.6f})))"
                 ),
                 (
                     f"(quote (bioclaw_path_edge_role {resolved_id} {index + 1} "
@@ -668,31 +599,17 @@ def path_skill_expressions(
             ]
         )
 
-    if len(step_stvs) >= 2:
-        for index, (left, right) in enumerate(zip(step_stvs, step_stvs[1:]), start=1):
-            expressions.extend(
-                _pln_path_step_expressions(
-                    resolved_id,
-                    index,
-                    _safe_claim_id(f"{instance.nodes[index - 1].label}_{instance.nodes[index - 1].identifier}"),
-                    _safe_claim_id(f"{instance.nodes[index].label}_{instance.nodes[index].identifier}"),
-                    _safe_claim_id(f"{instance.nodes[index + 1].label}_{instance.nodes[index + 1].identifier}"),
-                    left,
-                    right,
-                    default_stv,
-                )
-            )
-    else:
-        expressions.append(
-            f"(quote (bioclaw_path_pln_skipped {resolved_id} "
-            f"{_metta_string('path has fewer than two edges')}))"
-        )
+    expressions.append(
+        f"(quote (bioclaw_path_pln_skipped {resolved_id} "
+        f"{_metta_string('schema path has topology only; no data-derived edge STVs were provided')}))"
+    )
     path_labels = ["traceable_support"]
     if len(instance.schema_path.steps) == 1:
         path_labels.extend(["direct_kg_support", "evidence_candidate"])
     else:
         path_labels.extend(["schema_path_support", "hypothesis_candidate", "path_support_propagation_candidate"])
-    expressions.extend(curation_state_skill_expressions(resolved_id, tuple(path_labels), default_stv))
+    for label in path_labels:
+        expressions.append(f"(quote (bioclaw_curation_state {resolved_id} {_metta_string(label)}))")
 
     return expressions
 
@@ -723,8 +640,8 @@ def metta_program_for_path(
     lines.extend(
         [
             "",
-            "; Path-level truth-value propagation currently uses configured default edge STVs",
-            "; when the path traversal itself does not expose edge-level scores/evidence.",
+            "; PLN path propagation was skipped because this path payload has topology only.",
+            "; Add edge-level data-derived STVs before asking OmegaClaw to propagate support.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -747,7 +664,7 @@ def omegaclaw_path_mock_pytest(
         instance.nodes[0].identifier,
         instance.nodes[-1].identifier,
     ]
-    pln_expected = len(instance.schema_path.steps) >= 2
+    pln_expected = any("Truth__Deduction" in expression for expression in expressions)
     return f'''"""
 BioClaw Phase 2 OmegaClaw schema-path reasoning mock-loop probe.
 
@@ -829,7 +746,7 @@ def test_bioclaw_omegaclaw_schema_path_mock(llm, comm):
                 c.fail("PLN path support dispatched", "no Truth__Deduction call observed")
             c.ok("PLN path support dispatched", f"arg={{pln_arg[:140]!r}}")
         else:
-            c.ok("PLN path support skipped", "path has fewer than two edges")
+            c.ok("PLN path support skipped", "no data-derived edge STVs were available")
 
         c.step("verify schema-path fragments are visible in OmegaClaw logs")
         deadline = time.time() + 60
@@ -1083,11 +1000,9 @@ def omega_path_payload(
         "path_instance": instance.to_dict(),
         "path_support": {
             "path_id": resolved_id,
-            "edge_default_stv": {
-                "strength": _path_default_stv(policy)[0],
-                "confidence": _path_default_stv(policy)[1],
-            },
-            "pln_operation": "Truth__Deduction" if len(instance.schema_path.steps) >= 2 else None,
+            "edge_support_status": "topology_only",
+            "pln_operation": None,
+            "pln_status": "skipped_no_data_derived_edge_stvs",
             "edge_count": len(instance.schema_path.steps),
         },
         "omega_payload": {
@@ -1097,7 +1012,7 @@ def omega_path_payload(
             "omega_mock_test": omegaclaw_path_mock_pytest(instance, policy, path_id=resolved_id),
             "notes": [
                 "This payload is grounded in one MORK schema-path instance.",
-                "Path-level PLN currently propagates configured edge support over the bounded path.",
+                "Path-level PLN is skipped until edge-level data-derived STVs are available.",
                 "This is not global KG inference and does not invent missing path instances.",
                 "Run this through the OmegaClaw mock-loop harness to verify native (metta ...) dispatch.",
             ],
